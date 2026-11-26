@@ -1,11 +1,10 @@
 import { applyMove, isSolved, type Board, type Rods } from '../engine/board';
-import { solve } from '../engine/solver';
+import { solveForLevel } from '../engine/generate';
 import { stars, twoStarAllowance } from '../engine/score';
 import type { PuzzleData } from '../net/match';
 import { E2E } from '../config';
 import { BoardView } from './board-view';
 import { h } from './dom';
-import { miniBoard } from './rings';
 
 export interface SessionOptions {
   puzzle: PuzzleData;
@@ -32,16 +31,10 @@ export class GameSession {
 
   constructor(private o: SessionOptions) {
     this.board = o.puzzle.start;
-    this.view = new BoardView(this.board, o.puzzle.target, (f, t) => this.move(f, t));
+    this.view = new BoardView(this.board, (f, t) => this.move(f, t));
     this.view.setLocked(true);
 
     const p = o.puzzle;
-    const card = h(
-      'figure.card',
-      {},
-      miniBoard(p.target, p.start.capacity, 'mini.target'),
-      h('figcaption', {}, 'Match this'),
-    );
 
     this.el = h(
       'main.screen.play',
@@ -59,7 +52,7 @@ export class GameSession {
           this.starsEl,
         ),
       ),
-      h('section.cards', {}, card, o.side ?? null),
+      o.side ? h('section.cards', {}, o.side) : h('p.goal', {}, 'Sort the rings so every rod holds just one colour.'),
       this.view.el,
       h(
         'footer.actions',
@@ -69,7 +62,7 @@ export class GameSession {
       ),
     );
     this.paintStars();
-    if (E2E) (window as unknown as { __cs: unknown }).__cs = { solution: () => solve(this.board, p.target).moves };
+    if (E2E) (window as unknown as { __cs: unknown }).__cs = { solution: () => solveForLevel(this.board, p.level).moves };
   }
 
   start(): void {
@@ -97,7 +90,7 @@ export class GameSession {
     this.view.update(this.board, this.view.takeFlight());
     this.paintStars();
     this.o.onMove?.(this.board.rods, this.moves);
-    if (isSolved(this.board, this.o.puzzle.target)) {
+    if (isSolved(this.board)) {
       this.finished = true;
       this.view.setLocked(true);
       this.el.classList.add('solved');

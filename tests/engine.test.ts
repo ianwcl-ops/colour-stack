@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyMove, canMove, isSolved, type Board } from '../src/engine/board';
+import { applyMove, canMove, isRodComplete, isSolved, type Board } from '../src/engine/board';
 import { createRng, seedFromString } from '../src/engine/rng';
 import { LEVELS } from '../src/engine/levels';
 import { generatePuzzle } from '../src/engine/generate';
@@ -18,13 +18,16 @@ describe('board rules', () => {
     expect(canMove(board([[0], [1, 1, 1]]), 0, 1)).toBe(false);
   });
 
+  it('allows any colour onto any rod with space', () => {
+    expect(canMove(board([[0], [1]]), 0, 1)).toBe(true);
+  });
+
   it('does not allow moving a ring onto the rod it came from', () => {
     expect(canMove(board([[0], []]), 0, 0)).toBe(false);
   });
 
   it('moves only the top ring', () => {
-    const next = applyMove(board([[0, 1], []]), 0, 1);
-    expect(next.rods).toEqual([[0], [1]]);
+    expect(applyMove(board([[0, 1], []]), 0, 1).rods).toEqual([[0], [1]]);
   });
 
   it('never mutates the original board', () => {
@@ -36,12 +39,27 @@ describe('board rules', () => {
   it('throws on an illegal move', () => {
     expect(() => applyMove(board([[], []]), 0, 1)).toThrow();
   });
+});
 
-  it('is solved only when every rod matches the target exactly', () => {
-    const target = [[0, 1], [1]];
-    expect(isSolved(board([[0, 1], [1]]), target)).toBe(true);
-    expect(isSolved(board([[1, 0], [1]]), target)).toBe(false);
-    expect(isSolved(board([[0], [1, 1]]), target)).toBe(false);
+describe('win rule: every rod empty or full of one colour', () => {
+  it('a rod is complete only when full of a single colour', () => {
+    expect(isRodComplete([1, 1, 1], 3)).toBe(true);
+    expect(isRodComplete([1, 1], 3)).toBe(false);
+    expect(isRodComplete([1, 2, 1], 3)).toBe(false);
+    expect(isRodComplete([], 3)).toBe(false);
+  });
+
+  it('any colour may finish on any rod', () => {
+    expect(isSolved(board([[2, 2, 2], [], [0, 0, 0], [1, 1, 1]]))).toBe(true);
+    expect(isSolved(board([[], [0, 0, 0], [1, 1, 1], [2, 2, 2]]))).toBe(true);
+  });
+
+  it('a mixed rod is never solved', () => {
+    expect(isSolved(board([[0, 0, 1], [1, 1, 0], []]))).toBe(false);
+  });
+
+  it('a colour split across two rods is not solved', () => {
+    expect(isSolved(board([[0, 0], [0], [1, 1, 1]]))).toBe(false);
   });
 });
 
@@ -58,35 +76,47 @@ describe('seeded randomness', () => {
 });
 
 describe('levels', () => {
-  it('has exactly 5 levels that get harder', () => {
-    expect(LEVELS).toHaveLength(5);
+  it('matches the agreed ladder', () => {
+    expect(LEVELS.map((l) => [l.colours, l.height, l.spare])).toEqual([
+      [3, 3, 1],
+      [4, 4, 2],
+      [5, 5, 2],
+      [6, 6, 2],
+      [8, 7, 1],
+    ]);
+  });
+
+  it('gets bigger at every step', () => {
     for (let i = 1; i < LEVELS.length; i++) {
       const prev = LEVELS[i - 1]!;
       const cur = LEVELS[i]!;
-      expect(cur.colours * cur.height).toBeGreaterThanOrEqual(prev.colours * prev.height);
-      expect(cur.scramble).toBeGreaterThan(prev.scramble);
+      expect(cur.colours * cur.height).toBeGreaterThan(prev.colours * prev.height);
     }
   });
 });
 
 describe('solver', () => {
-  it('heuristic is zero on a solved board', () => {
-    expect(heuristic([[0, 1], []], [[0, 1], []])).toBe(0);
+  it('heuristic is zero on a sorted board', () => {
+    expect(heuristic([[0, 0], [1, 1], []], 2)).toBe(0);
+  });
+
+  it('heuristic counts rings that must move', () => {
+    // Rod 0: pink above blue must move (1). Pink also sits at the bottom of rod 1,
+    // and blue's bottom runs are split: at least one run must leave.
+    expect(heuristic([[0, 1], [1, 0], []], 2)).toBeGreaterThanOrEqual(2);
   });
 
   it('finds the optimal number of moves for a small puzzle', () => {
-    // Swap two single rings using a spare rod: needs 3 moves.
-    const result = solve(board([[1], [0], []], 1), [[0], [1], []], 10_000);
+    const result = solve(board([[0, 1], [1, 0], []], 2), 10_000);
     expect(result.optimal).toBe(true);
     expect(result.moves).toHaveLength(3);
   });
 
-  it('returns a path that actually solves the puzzle', () => {
-    const target = [[0, 0, 0], [1, 1, 1], []];
+  it('returns a path that actually sorts the puzzle', () => {
     let b = board([[0, 1, 0], [1, 0, 1], []]);
-    const result = solve(b, target, 50_000);
+    const result = solve(b, 50_000);
     for (const [from, to] of result.moves) b = applyMove(b, from, to);
-    expect(isSolved(b, target)).toBe(true);
+    expect(isSolved(b)).toBe(true);
   });
 });
 
@@ -95,27 +125,32 @@ describe('puzzle generation', () => {
     expect(generatePuzzle('room-abc', 3)).toEqual(generatePuzzle('room-abc', 3));
   });
 
-  it.each([1, 2, 3, 4, 5])('level %i is solvable within par and does not start solved', (level) => {
+  it.each([1, 2, 3, 4, 5])('level %i is solvable in par moves, starts unsorted and well mixed', (level) => {
     const p = generatePuzzle(`seed-${level}`, level);
-    expect(isSolved(p.start, p.target)).toBe(false);
+    const l = LEVELS[level - 1]!;
+    expect(p.start.rods).toHaveLength(l.colours + l.spare);
+    expect(p.start.capacity).toBe(l.height);
+    expect(isSolved(p.start)).toBe(false);
+    // Hardly any rod starts already complete.
+    expect(p.start.rods.filter((r) => isRodComplete(r, l.height)).length).toBeLessThanOrEqual(level >= 3 ? 0 : 1);
     let b = p.start;
     for (const [from, to] of p.solution) b = applyMove(b, from, to);
-    expect(isSolved(b, p.target)).toBe(true);
+    expect(isSolved(b)).toBe(true);
     expect(p.solution).toHaveLength(p.par);
-  });
+  }, 30_000);
 
-  it('keeps every colour count the same between start and target', () => {
+  it('has every colour exactly `height` times', () => {
     const p = generatePuzzle('count', 4);
-    const tally = (rods: number[][]) => rods.flat().sort().join(',');
-    expect(tally(p.start.rods)).toBe(tally(p.target));
+    const counts = new Map<number, number>();
+    for (const c of p.start.rods.flat()) counts.set(c, (counts.get(c) ?? 0) + 1);
+    expect([...counts.values()]).toEqual(Array(6).fill(6));
   });
 
-  it('uses solid-colour targets on the easy levels and patterns from level 3', () => {
-    const easy = generatePuzzle('x', 1);
-    expect(easy.target.filter((r) => r.length).every((r) => new Set(r).size === 1)).toBe(true);
-    const hard = generatePuzzle('x', 3);
-    expect(hard.target.some((r) => new Set(r).size > 1)).toBe(true);
-  });
+  it('level 5 needs far more moves than level 3', () => {
+    const p3 = generatePuzzle('compare', 3);
+    const p5 = generatePuzzle('compare', 5);
+    expect(p5.par).toBeGreaterThan(p3.par * 2);
+  }, 30_000);
 });
 
 describe('stars', () => {
@@ -136,12 +171,9 @@ describe('daily challenge', () => {
     expect(dailyKey(new Date(2026, 10, 26, 23, 59))).toBe('2026-11-26');
   });
   it('gives everyone the same puzzle spec on the same day', () => {
-    const d = new Date(2026, 10, 26);
-    expect(dailyPuzzleSpec(d)).toEqual(dailyPuzzleSpec(new Date(2026, 10, 26, 18)));
+    expect(dailyPuzzleSpec(new Date(2026, 10, 26))).toEqual(dailyPuzzleSpec(new Date(2026, 10, 26, 18)));
   });
   it('gets harder towards the weekend', () => {
-    const monday = dailyPuzzleSpec(new Date(2026, 10, 23)).level;
-    const sunday = dailyPuzzleSpec(new Date(2026, 10, 29)).level;
-    expect(sunday).toBeGreaterThan(monday);
+    expect(dailyPuzzleSpec(new Date(2026, 10, 29)).level).toBeGreaterThan(dailyPuzzleSpec(new Date(2026, 10, 23)).level);
   });
 });

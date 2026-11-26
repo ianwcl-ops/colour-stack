@@ -4,8 +4,7 @@ import { createMatch, reduce, type MatchState, type PuzzleData, type Msg } from 
 const puzzle: PuzzleData = {
   seed: 's',
   level: 1,
-  start: { rods: [[1], [0], []], capacity: 1 },
-  target: [[0], [1], []],
+  start: { rods: [[0, 1], [1, 0], []], capacity: 2 },
   par: 3,
   parIsMinimum: true,
 };
@@ -101,11 +100,63 @@ describe('match protocol', () => {
     expect(g.score).toEqual({ host: 0, guest: 1 });
   });
 
-  it('guest asking for a rematch is passed to the host', () => {
-    const r = run(createMatch('guest', 'Jo'), { kind: 'request-rematch' });
-    expect(r.out).toEqual([{ t: 'rematch' }]);
-    const h = run(createMatch('host', 'Sam'), { kind: 'recv', msg: { t: 'rematch' } });
-    expect(h.state.rematchRequested).toBe(true);
+  describe('rematch: both players tap, then the host starts the next round', () => {
+    const finishedHost = () =>
+      run(createMatch('host', 'Sam'), { kind: 'start-round', puzzle }, { kind: 'go' }, { kind: 'local-solved', moves: 3, ms: 1 }).state;
+    const finishedGuest = () =>
+      run(
+        createMatch('guest', 'Jo'),
+        { kind: 'recv', msg: { t: 'start', round: 1, puzzle } },
+        { kind: 'go' },
+        { kind: 'recv', msg: { t: 'result', round: 1, winner: 'host', host: { moves: 3, ms: 1 }, guest: null, score: { host: 1, guest: 0 } } },
+      ).state;
+
+    it('either player tapping Rematch tells the other they are ready', () => {
+      const g = run(finishedGuest(), { kind: 'request-rematch' });
+      expect(g.state.meReady).toBe(true);
+      expect(g.out).toEqual([{ t: 'rematch' }]);
+
+      const h = run(finishedHost(), { kind: 'request-rematch' });
+      expect(h.state.meReady).toBe(true);
+      expect(h.out).toEqual([{ t: 'rematch' }]);
+    });
+
+    it('each side sees when the other is ready', () => {
+      const h = run(finishedHost(), { kind: 'recv', msg: { t: 'rematch' } });
+      expect(h.state.oppReady).toBe(true);
+      const g = run(finishedGuest(), { kind: 'recv', msg: { t: 'rematch' } });
+      expect(g.state.oppReady).toBe(true);
+    });
+
+    it('only when both are ready is the next round due (host side)', () => {
+      let h = run(finishedHost(), { kind: 'request-rematch' }).state;
+      expect(h.bothReady).toBe(false);
+      h = run(h, { kind: 'recv', msg: { t: 'rematch' } }).state;
+      expect(h.bothReady).toBe(true);
+    });
+
+    it('cannot ask for a rematch mid-race', () => {
+      const s = run(createMatch('host', 'Sam'), { kind: 'start-round', puzzle }, { kind: 'go' }).state;
+      const r = run(s, { kind: 'request-rematch' });
+      expect(r.out).toEqual([]);
+      expect(r.state.meReady).toBe(false);
+    });
+
+    it('the room creator can change the level before the rematch, and the guest sees it', () => {
+      const h = run(finishedHost(), { kind: 'set-level', level: 5 });
+      expect(h.state.level).toBe(5);
+      expect(h.out).toEqual([{ t: 'level', level: 5 }]);
+      const g = run(finishedGuest(), { kind: 'recv', msg: { t: 'level', level: 5 } });
+      expect(g.state.level).toBe(5);
+      // The guest cannot change it.
+      expect(run(finishedGuest(), { kind: 'set-level', level: 2 }).state.level).toBe(1);
+    });
+
+    it('starting the next round clears ready flags', () => {
+      let h = run(finishedHost(), { kind: 'request-rematch' }, { kind: 'recv', msg: { t: 'rematch' } }).state;
+      h = run(h, { kind: 'start-round', puzzle }).state;
+      expect([h.meReady, h.oppReady, h.bothReady]).toEqual([false, false, false]);
+    });
   });
 
   it('second round keeps the running score and resets the boards', () => {

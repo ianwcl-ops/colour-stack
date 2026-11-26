@@ -19,6 +19,9 @@
   --green: #5dbb46;
   --blue: #1ba1e2;
   --purple: #7b4cd8;
+  --orange: #ff7f1e;
+  --teal: #10b3a3;
+  --charcoal: #3d4659;
 
   --radius-s: 10px;
   --radius-l: 22px;
@@ -139,6 +142,9 @@ h1, h2 { margin: 0; line-height: 1.1; }
 .c2 { --c: var(--green); }
 .c3 { --c: var(--blue); }
 .c4 { --c: var(--purple); }
+.c5 { --c: var(--orange); }
+.c6 { --c: var(--teal); }
+.c7 { --c: var(--charcoal); }
 
 /* ---------- Play screen ---------- */
 .bar { display: flex; align-items: center; gap: 12px; }
@@ -189,16 +195,19 @@ h1, h2 { margin: 0; line-height: 1.1; }
 .opponent p { margin: 0; font-size: 0.85rem; color: var(--ink-soft); }
 .opponent p span { font-weight: 650; color: var(--ink); }
 
-/* Rods on the tabletop */
+/* Rods on the tabletop (big boards wrap onto two shelves on phones) */
 .table {
   --gap: 6px;
-  --ring-w: min(68px, calc((min(100vw, 560px) - 32px) / var(--rods) - var(--gap)));
-  --ring-h: max(18px, min(46px, calc(var(--ring-w) * 0.6), calc((100dvh - 390px) / (var(--cap) + 1.6))));
+  --rows: 1;
+  --ring-w: min(68px, calc((min(100vw, 560px) - 32px) / var(--cols) - var(--gap)));
+  --ring-h: max(16px, min(46px, calc(var(--ring-w) * 0.6), calc((100dvh - 300px - (var(--rows) - 1) * 70px) / (var(--rows) * (var(--cap) + 1.6)))));
   margin-block: auto;
   user-select: none;
   -webkit-user-select: none;
   touch-action: none;
 }
+.shelves { display: grid; gap: 30px; }
+.goal { margin: 0; color: var(--ink-soft); text-align: center; }
 .rods { display: flex; justify-content: center; gap: var(--gap); padding: 0 4px; }
 .rod {
   all: unset;
@@ -246,6 +255,8 @@ h1, h2 { margin: 0; line-height: 1.1; }
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
 }
+.shelf:not(:last-child) .tabletop { height: 14px; margin: 0 8px; border-radius: 0 0 8px 8px; }
+.shelf:not(:last-child) .rod .match { bottom: -40px; z-index: 1; }
 .tabletop {
   height: 40px;
   margin: 0 -16px;
@@ -280,6 +291,9 @@ h1, h2 { margin: 0; line-height: 1.1; }
   text-align: center;
   animation: rise 260ms cubic-bezier(.3, .7, .25, 1);
 }
+.sheet.static { animation: none; }
+.sheet .level-pick { justify-content: center; }
+.sheet .level-pick legend { margin-inline: auto; }
 .sheet h2 { font-size: 2rem; }
 .won .sheet h2 { color: var(--pink); }
 .result { margin: 0; font-size: 1.05rem; }

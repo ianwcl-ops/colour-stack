@@ -8,7 +8,6 @@ export interface PuzzleData {
   seed: string;
   level: number;
   start: Board;
-  target: Rods;
   par: number;
   parIsMinimum: boolean;
 }
@@ -57,7 +56,10 @@ export interface MatchState {
   oppSolve: SolveStat | null;
   winner: Role | null;
   score: Score;
-  rematchRequested: boolean;
+  /** Rematch: I've tapped it / they've tapped it / both, so the host starts the next round. */
+  meReady: boolean;
+  oppReady: boolean;
+  bothReady: boolean;
 }
 
 export function createMatch(role: Role, myName: string, level = 3): MatchState {
@@ -75,7 +77,9 @@ export function createMatch(role: Role, myName: string, level = 3): MatchState {
     oppSolve: null,
     winner: null,
     score: { host: 0, guest: 0 },
-    rematchRequested: false,
+    meReady: false,
+    oppReady: false,
+    bothReady: false,
   };
 }
 
@@ -96,7 +100,7 @@ export function isMsg(v: unknown): v is Msg {
     case 'start': {
       const p = m.puzzle as Record<string, unknown> | undefined;
       const start = p?.start as Record<string, unknown> | undefined;
-      return isNum(m.round) && !!p && isRods(p.target) && !!start && isRods(start.rods) && isNum(start.capacity) && isNum(p.par);
+      return isNum(m.round) && !!p && !!start && isRods(start.rods) && isNum(start.capacity) && isNum(p.par);
     }
     case 'progress':
       return isNum(m.round) && isRods(m.rods) && isNum(m.moves);
@@ -135,7 +139,8 @@ export function reduce(s: MatchState, e: MatchEvent): { state: MatchState; outbo
       return { state: { ...s, oppPresent: false }, outbox: [] };
 
     case 'set-level':
-      if (s.role !== 'host') return none;
+      // Only the room creator, and never mid-race.
+      if (s.role !== 'host' || (s.phase !== 'lobby' && s.phase !== 'finished')) return none;
       return { state: { ...s, level: e.level }, outbox: [{ t: 'level', level: e.level }] };
 
     case 'start-round': {
@@ -166,7 +171,8 @@ export function reduce(s: MatchState, e: MatchEvent): { state: MatchState; outbo
     }
 
     case 'request-rematch':
-      return s.role === 'guest' ? { state: s, outbox: [{ t: 'rematch' }] } : none;
+      if (s.phase !== 'finished' || s.meReady) return none;
+      return { state: ready({ ...s, meReady: true }), outbox: [{ t: 'rematch' }] };
 
     case 'recv':
       return isMsg(e.msg) ? receive(s, e.msg) : none;
@@ -184,9 +190,13 @@ function startRound(s: MatchState, round: number, puzzle: PuzzleData): MatchStat
     mySolve: null,
     oppSolve: null,
     winner: null,
-    rematchRequested: false,
+    meReady: false,
+    oppReady: false,
+    bothReady: false,
   };
 }
+
+const ready = (s: MatchState): MatchState => ({ ...s, bothReady: s.meReady && s.oppReady });
 
 function receive(s: MatchState, m: Msg): { state: MatchState; outbox: Msg[] } {
   const none = { state: s, outbox: [] as Msg[] };
@@ -220,6 +230,6 @@ function receive(s: MatchState, m: Msg): { state: MatchState; outbox: Msg[] } {
         outbox: [],
       };
     case 'rematch':
-      return s.role === 'host' ? { state: { ...s, rematchRequested: true }, outbox: [] } : none;
+      return s.phase === 'finished' ? { state: ready({ ...s, oppReady: true }), outbox: [] } : none;
   }
 }

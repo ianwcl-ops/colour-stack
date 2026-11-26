@@ -1,22 +1,28 @@
-import { boardKey, canMove, type Board, type Move, type Rods } from './board';
+import type { Board, Move, Rods } from './board';
 
 /**
- * Admissible lower bound on moves left. On each rod, every ring at or above the
- * first wrong position must leave, and every target ring from there up must arrive.
- * A move does one of each, so the larger total is a valid lower bound.
+ * Admissible lower bound on moves left to sort the board.
+ * - Every ring sitting above a different colour must move at least once.
+ * - If a colour forms the bottom run of several rods, only one of those runs can
+ *   stay put, so all the others must move.
  */
-export function heuristic(rods: Rods, target: Rods): number {
-  let out = 0;
-  let inn = 0;
-  for (let r = 0; r < rods.length; r++) {
-    const cur = rods[r]!;
-    const tgt = target[r]!;
-    let i = 0;
-    while (i < cur.length && i < tgt.length && cur[i] === tgt[i]) i++;
-    out += cur.length - i;
-    inn += tgt.length - i;
+export function heuristic(rods: Rods, _capacity: number): number {
+  let total = 0;
+  const runs = new Map<number, number[]>();
+  for (const rod of rods) {
+    if (!rod.length) continue;
+    let run = 1;
+    while (run < rod.length && rod[run] === rod[0]) run++;
+    total += rod.length - run;
+    const c = rod[0]!;
+    const list = runs.get(c);
+    if (list) list.push(run);
+    else runs.set(c, [run]);
   }
-  return Math.max(out, inn);
+  for (const list of runs.values()) {
+    if (list.length > 1) total += list.reduce((a, b) => a + b, 0) - Math.max(...list);
+  }
+  return total;
 }
 
 export interface SolveResult {
@@ -26,8 +32,11 @@ export interface SolveResult {
   found: boolean;
 }
 
+/** Internally each rod is a short string (one char per ring): fast to copy, compare and key. */
+type SRods = string[];
+
 interface Node {
-  rods: Rods;
+  rods: SRods;
   g: number;
   f: number;
   parent: Node | null;
@@ -77,47 +86,122 @@ class MinHeap {
   }
 }
 
-function search(start: Board, target: Rods, limit: number, weight: number): Move[] | null {
-  const goal = boardKey(target);
+const toS = (rods: Rods): SRods => rods.map((r) => String.fromCharCode(...r.map((c) => 65 + c)));
+const keyS = (rods: SRods): string => rods.slice().sort().join('|');
+
+function uniformS(rod: string): boolean {
+  for (let i = 1; i < rod.length; i++) if (rod.charCodeAt(i) !== rod.charCodeAt(0)) return false;
+  return true;
+}
+
+function solvedS(rods: SRods, cap: number): boolean {
+  for (const r of rods) if (r.length && (r.length !== cap || !uniformS(r))) return false;
+  return true;
+}
+
+/** Same bound as `heuristic`, on the string form. */
+function hS(rods: SRods): number {
+  let total = 0;
+  const runs: number[][] = [];
+  for (const rod of rods) {
+    if (!rod.length) continue;
+    const c = rod.charCodeAt(0);
+    let run = 1;
+    while (run < rod.length && rod.charCodeAt(run) === c) run++;
+    total += rod.length - run;
+    (runs[c] ??= []).push(run);
+  }
+  for (const list of runs) {
+    if (list && list.length > 1) {
+      let sum = 0;
+      let max = 0;
+      for (const v of list) {
+        sum += v;
+        if (v > max) max = v;
+      }
+      total += sum - max;
+    }
+  }
+  return total;
+}
+
+function search(start: Board, limit: number, weight: number, prune: boolean): Move[] | null {
+  const cap = start.capacity;
+  const init = toS(start.rods);
   const best = new Map<string, number>();
   const heap = new MinHeap();
-  heap.push({ rods: start.rods, g: 0, f: weight * heuristic(start.rods, target), parent: null, move: null });
-  best.set(boardKey(start.rods), 0);
+  heap.push({ rods: init, g: 0, f: weight * hS(init), parent: null, move: null });
+  best.set(keyS(init), 0);
   let expanded = 0;
+  const n = init.length;
   while (heap.size) {
     const node = heap.pop()!;
-    const key = boardKey(node.rods);
-    if (key === goal) {
+    const rods = node.rods;
+    if (solvedS(rods, cap)) {
       const path: Move[] = [];
-      for (let n: Node | null = node; n && n.move; n = n.parent) path.push(n.move);
+      for (let x: Node | null = node; x && x.move; x = x.parent) path.push(x.move);
       return path.reverse();
     }
-    if ((best.get(key) ?? Infinity) < node.g) continue;
+    if ((best.get(keyS(rods)) ?? Infinity) < node.g) continue;
     if (++expanded > limit) return null;
-    const board: Board = { rods: node.rods, capacity: start.capacity };
-    for (let from = 0; from < node.rods.length; from++) {
-      for (let to = 0; to < node.rods.length; to++) {
-        if (!canMove(board, from, to)) continue;
-        // Moving straight back undoes the last move; never useful.
+    for (let from = 0; from < n; from++) {
+      const src = rods[from]!;
+      if (!src.length) continue;
+      const srcUniform = uniformS(src);
+      if (prune && srcUniform && src.length === cap) continue;
+      const ring = src[src.length - 1]!;
+      const rest = src.slice(0, -1);
+      let triedEmpty = false;
+      for (let to = 0; to < n; to++) {
+        if (to === from) continue;
+        const dst = rods[to]!;
+        if (dst.length >= cap) continue;
         if (node.move && node.move[0] === to && node.move[1] === from) continue;
-        const rods = node.rods.map((r, i) => (i === from || i === to ? r.slice() : r));
-        rods[to]!.push(rods[from]!.pop()!);
+        if (!dst.length) {
+          // All empty rods are equivalent; moving a single-colour rod onto an empty one achieves nothing.
+          if (triedEmpty || (prune && srcUniform)) continue;
+          triedEmpty = true;
+        }
+        const next = rods.slice();
+        next[from] = rest;
+        next[to] = dst + ring;
         const g = node.g + 1;
-        const k = boardKey(rods);
+        const k = keyS(next);
         if ((best.get(k) ?? Infinity) <= g) continue;
         best.set(k, g);
-        heap.push({ rods, g, f: g + weight * heuristic(rods, target), parent: node, move: [from, to] });
+        heap.push({ rods: next, g, f: g + weight * hS(next), parent: node, move: [from, to] });
       }
     }
   }
   return null;
 }
 
-/** Optimal A* first; if that runs out of budget, a weighted search for a good path. */
-export function solve(start: Board, target: Rods, limit = 120_000): SolveResult {
-  const exact = search(start, target, limit, 1);
-  if (exact) return { moves: exact, optimal: true, found: true };
-  const approx = search(start, target, limit, 2.5);
-  if (approx) return { moves: approx, optimal: false, found: true };
-  return { moves: [], optimal: false, found: false };
+export interface SolveOptions {
+  /** Node budget for the proven-optimal search (0 skips it). */
+  exactLimit?: number;
+  /** Node budget for each weighted search. */
+  approxLimit?: number;
+  weights?: number[];
+}
+
+/**
+ * Proven-optimal A* when the board is small enough; otherwise an "anytime" run of
+ * weighted searches, keeping the shortest solution found. Budgets are node counts,
+ * not time, so every device computes exactly the same par.
+ */
+export function solve(start: Board, opts: SolveOptions | number = {}): SolveResult {
+  const o = typeof opts === 'number' ? { exactLimit: opts } : opts;
+  const exactLimit = o.exactLimit ?? 150_000;
+  const approxLimit = o.approxLimit ?? 30_000;
+  if (exactLimit > 0) {
+    const exact = search(start, exactLimit, 1, false);
+    if (exact) return { moves: exact, optimal: true, found: true };
+  }
+  let bestMoves: Move[] | null = null;
+  for (const w of o.weights ?? [3, 1.8]) {
+    // A bigger weight finds some solution fast; smaller weights then look for shorter ones.
+    const m = search(start, approxLimit, w, true);
+    if (m && (!bestMoves || m.length < bestMoves.length)) bestMoves = m;
+  }
+  return bestMoves ? { moves: bestMoves, optimal: false, found: true } : { moves: [], optimal: false, found: false };
 }

@@ -1,47 +1,51 @@
-import { applyMove, canMove, isSolved, type Board, type Move, type Rods } from './board';
+import { applyMove, canMove, isRodComplete, isSolved, type Board, type Move, type Rods } from './board';
 import { getLevel } from './levels';
 import { createRng, seedFromString, shuffle } from './rng';
-import { heuristic, solve } from './solver';
+import { solve } from './solver';
 
 export interface Puzzle {
   readonly seed: string;
   readonly level: number;
   readonly start: Board;
-  readonly target: Rods;
-  /** Fewest moves found (proven minimum when `parIsMinimum`). */
+  /** Fewest moves found (the proven minimum when `parIsMinimum`). */
   readonly par: number;
   readonly parIsMinimum: boolean;
   readonly solution: Move[];
 }
 
-function buildTarget(colours: number, height: number, spare: number, patterned: boolean, rng: () => number): Rods {
-  const order = shuffle([...Array(colours).keys()], rng);
-  let full: Rods;
-  if (!patterned) {
-    full = order.map((c) => Array<number>(height).fill(c));
-  } else {
-    const rings = order.flatMap((c) => Array<number>(height).fill(c));
-    do {
-      const mixed = shuffle(rings, rng);
-      full = order.map((_, i) => mixed.slice(i * height, (i + 1) * height));
-    } while (full.every((r) => new Set(r).size === 1));
-  }
-  return [...full, ...Array.from({ length: spare }, () => [] as number[])];
+/** Search budgets per level: exact on small boards, best-found on big ones. */
+const SOLVER_BUDGET = [
+  { exactLimit: 100_000 },
+  { exactLimit: 100_000 },
+  { exactLimit: 15_000, approxLimit: 15_000, weights: [1.6] },
+  { exactLimit: 0, approxLimit: 15_000, weights: [5, 2] },
+  { exactLimit: 0, approxLimit: 15_000, weights: [8, 3] },
+];
+
+/** Solve with the same budget that sets par, so the result is reproducible. */
+export function solveForLevel(board: Board, levelId: number) {
+  return solve(board, SOLVER_BUDGET[levelId - 1]!);
 }
 
 /** Deterministic: the same seed and level always produce the same puzzle. */
 export function generatePuzzle(seed: string, levelId: number): Puzzle {
   const level = getLevel(levelId);
-  const rng = createRng(seedFromString(`${seed}#${levelId}`));
-  const target = buildTarget(level.colours, level.height, level.spare, level.patterned, rng);
-  const goal: Board = { rods: target, capacity: level.height };
+  const rng = createRng(seedFromString(`${seed}#${levelId}#sort`));
+  const cap = level.height;
 
-  // Mix by playing random legal moves from the target, so a solution always exists.
-  let board = goal;
+  // Start sorted, then mix with random legal moves. Every move can be undone,
+  // so the puzzle is always solvable, even with a single spare rod.
+  const sorted: Rods = [
+    ...[...Array(level.colours).keys()].map((c) => Array<number>(cap).fill(c)),
+    ...Array.from({ length: level.spare }, () => [] as number[]),
+  ];
+  let board: Board = { rods: shuffle(sorted, rng), capacity: cap };
   const history: Move[] = [];
   let last: Move | null = null;
-  const minDistance = Math.ceil(level.scramble / 2);
-  while (history.length < level.scramble || heuristic(board.rods, target) < minDistance || isSolved(board, target)) {
+  const allowedComplete = levelId >= 3 ? 0 : 1;
+  const wellMixed = (b: Board) => !isSolved(b) && b.rods.filter((r) => isRodComplete(r, cap)).length <= allowedComplete;
+
+  while (history.length < level.scramble || !wellMixed(board)) {
     const options: Move[] = [];
     for (let f = 0; f < board.rods.length; f++)
       for (let t = 0; t < board.rods.length; t++)
@@ -50,23 +54,23 @@ export function generatePuzzle(seed: string, levelId: number): Puzzle {
     board = applyMove(board, move[0], move[1]);
     history.push(move);
     last = move;
-    if (history.length > level.scramble * 4) break;
+    if (history.length > level.scramble * 6) break;
   }
 
-  const fallback = history
+  const fallback: Move[] = history
     .slice()
     .reverse()
     .map(([f, t]) => [t, f] as const);
-  const result = solve(board, target);
-  const solution = result.found && result.moves.length <= fallback.length ? result.moves : fallback;
+  const result = solveForLevel(board, levelId);
+  const useSolver = result.found && result.moves.length <= fallback.length;
+  const solution = useSolver ? result.moves : fallback;
 
   return {
     seed,
     level: levelId,
     start: board,
-    target,
     par: solution.length,
-    parIsMinimum: result.optimal && solution === result.moves,
+    parIsMinimum: useSolver && result.optimal,
     solution,
   };
 }

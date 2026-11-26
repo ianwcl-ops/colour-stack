@@ -29,7 +29,6 @@ const toData = (p: Puzzle): PuzzleData => ({
   seed: p.seed,
   level: p.level,
   start: p.start,
-  target: p.target,
   par: p.par,
   parIsMinimum: p.parIsMinimum,
 });
@@ -106,7 +105,7 @@ function home(): void {
       'main.screen.home',
       {},
       logo(true),
-      h('p.lede', {}, 'Move the rings to match the card. Fewest moves wins the stars.'),
+      h('p.lede', {}, 'Sort the rings so every rod holds just one colour. Fewest moves wins the stars.'),
       h(
         'nav.menu',
         {},
@@ -183,14 +182,14 @@ function starRow(n: number): HTMLElement {
   return h('div.stars', { 'aria-label': `${n} of 3 stars` }, ...[1, 2, 3].map((i) => h(`span.star${i <= n ? '.on' : ''}`, { style: `--i:${i}` }, '★')));
 }
 
-function sheet(title: string, body: (Node | null)[], actions: HTMLElement[]): HTMLElement {
+function sheet(title: string, body: (Node | null)[], actions: HTMLElement[], focus = true): HTMLElement {
   const el = h(
     'div.sheet-backdrop',
     {},
     h('section.sheet', { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'sheet-title' }, h('h2', { id: 'sheet-title' }, title), ...body, h('div.sheet-actions', {}, ...actions)),
   );
   document.body.append(el);
-  actions[0]?.focus();
+  if (focus) actions[0]?.focus();
   return el;
 }
 
@@ -216,7 +215,7 @@ function practiceMenu(): void {
               { type: 'button', onclick: () => practice(l.id) },
               h('span.num', {}, String(l.id)),
               h('span.name', {}, l.name),
-              h('span.desc', {}, `${l.colours} colours, rods hold ${l.height}${l.patterned ? ', mixed pattern' : ''}`),
+              h('span.desc', {}, `${l.colours} colours, ${l.height} rings each, ${l.spare === 1 ? 'only 1 spare rod' : `${l.spare} spare rods`}`),
             ),
           ),
         ),
@@ -444,30 +443,56 @@ function startRace(role: 'host' | 'guest', code: string): void {
     setTimeout(tick, 800);
   }
 
-  function results(s: MatchState): void {
+  /** Result sheet with the rematch flow. Rebuilt whenever the match state changes. */
+  function results(s: MatchState, first: boolean): void {
     const iWon = s.winner === s.role;
     const mine = s.mySolve;
-    const lines: (Node | null)[] = [
-      h('p.result', {}, iWon ? `You solved it first${mine ? ` in ${mine.moves} moves (${formatTime(mine.ms)})` : ''}.` : `${s.oppName} solved it first.`),
-      mine && s.puzzle ? starRow(stars(mine.moves, s.puzzle.par)) : null,
-      h('p.score', {}, `${s.myName} ${s.score[s.role]}, ${s.oppName} ${s.score[s.role === 'host' ? 'guest' : 'host']}`),
-    ];
-    const again =
+    const level = getLevel(s.level);
+
+    const rematch = h<'button'>(
+      'button.primary',
+      { type: 'button', id: 'rematch', disabled: s.meReady, onclick: () => dispatch({ kind: 'request-rematch' }) },
+      s.meReady ? `Waiting for ${s.oppName}…` : 'Rematch',
+    );
+    const readiness = s.oppReady
+      ? h('p.status.ready', { role: 'status' }, `${s.oppName} is ready for a rematch.`)
+      : s.meReady
+        ? h('p.status', { role: 'status' }, `Waiting for ${s.oppName} to tap Rematch.`)
+        : null;
+
+    const levelChoice =
       s.role === 'host'
-        ? h('button.primary', { type: 'button', onclick: () => void newRound() }, 'Play again')
-        : h('button.primary', {
-            type: 'button',
-            onclick: (ev) => {
-              dispatch({ kind: 'request-rematch' });
-              const b = ev.currentTarget as HTMLButtonElement;
-              b.textContent = `Asked ${s.oppName}`;
-              b.disabled = true;
-            },
-          }, 'Ask for a rematch');
-    const lobbyBtn = h('button', { type: 'button', onclick: () => { sheetEl?.remove(); sheetEl = null; session?.destroy(); session = null; mount(app, lobby(state)); } }, 'Change level');
-    sheetEl = sheet(iWon ? 'You win!' : `${s.oppName} wins`, lines, s.role === 'host' ? [again, lobbyBtn, h('button.ghost', { type: 'button', onclick: leave }, 'Leave')] : [again, h('button.ghost', { type: 'button', onclick: leave }, 'Leave')]);
+        ? h(
+            'fieldset.level-pick',
+            {},
+            h('legend', {}, 'Next level'),
+            ...LEVELS.map((l) =>
+              h(
+                `button.chip${l.id === s.level ? '.on' : ''}`,
+                { type: 'button', 'aria-pressed': l.id === s.level ? 'true' : 'false', onclick: () => dispatch({ kind: 'set-level', level: l.id }) },
+                h('b', {}, String(l.id)),
+                h('span', {}, l.name),
+              ),
+            ),
+          )
+        : h('p.help', {}, `Next level: ${level.id} ${level.name}. ${s.oppName} can change it.`);
+
+    const old = sheetEl;
+    sheetEl = sheet(
+      iWon ? 'You win!' : `${s.oppName} wins`,
+      [
+        h('p.result', {}, iWon ? `You sorted it first${mine ? ` in ${mine.moves} moves (${formatTime(mine.ms)})` : ''}.` : `${s.oppName} sorted it first.`),
+        mine && s.puzzle ? starRow(stars(mine.moves, s.puzzle.par)) : null,
+        h('p.score', {}, `${s.myName} ${s.score[s.role]}, ${s.oppName} ${s.score[s.role === 'host' ? 'guest' : 'host']}`),
+        levelChoice,
+        readiness,
+      ],
+      [rematch, h('button.ghost', { type: 'button', onclick: leave }, 'Leave')],
+      first,
+    );
+    old?.remove();
     sheetEl.classList.add(iWon ? 'won' : 'lost');
-    if (s.rematchRequested) sheetEl.querySelector('.sheet')?.append(h('p.status.ready', {}, `${s.oppName} wants a rematch.`));
+    if (!first) sheetEl.querySelector('.sheet')?.classList.add('static');
   }
 
   function paint(prev: MatchState, s: MatchState): void {
@@ -509,9 +534,17 @@ function startRace(role: 'host' | 'guest', code: string): void {
 
     if (s.phase === 'finished' && prev.phase !== 'finished') {
       session?.lock();
-      setTimeout(() => results(s), reducedMotion() ? 0 : 400);
-    } else if (s.phase === 'finished' && s.rematchRequested && !prev.rematchRequested && sheetEl) {
-      sheetEl.querySelector('.sheet')?.append(h('p.status.ready', {}, `${s.oppName} wants a rematch.`));
+      setTimeout(() => {
+        if (state.phase === 'finished' && state.round === s.round) results(state, true);
+      }, reducedMotion() ? 0 : 400);
+    } else if (s.phase === 'finished' && sheetEl) {
+      results(s, false);
+    }
+
+    // Both tapped Rematch: the room creator deals the next puzzle.
+    if (s.role === 'host' && s.bothReady && !prev.bothReady) {
+      sheetEl?.querySelector('.sheet')?.append(h('p.status', { role: 'status' }, 'Shuffling the rings…'));
+      void newRound();
     }
 
     if (!s.oppPresent && prev.oppPresent) {

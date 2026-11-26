@@ -111,9 +111,6 @@ test.describe('two-player race', () => {
     await expect(guest.locator('.countdown')).toHaveCount(0, { timeout: 8000 });
 
     // Same puzzle on both screens.
-    const cardHost = await host.locator('.card').innerHTML();
-    const cardGuest = await guest.locator('.card').innerHTML();
-    expect(cardHost).toBe(cardGuest);
     expect(await host.locator('.rods').innerHTML()).toBe(await guest.locator('.rods').innerHTML());
 
     // Guest makes a move: host's opponent view updates live.
@@ -126,14 +123,20 @@ test.describe('two-player race', () => {
     // Host solves first and wins on both screens.
     await solveByTapping(host);
     await expect(host.getByRole('dialog')).toContainText('You win!');
+    await expect(host.locator('.rod.done').first()).toBeVisible();
     await expect(guest.getByRole('dialog')).toContainText('Sam wins');
     await expect(guest.getByRole('dialog')).toContainText('Jo 0, Sam 1');
 
-    // Rematch: guest asks, host sees it and starts round 2.
-    await guest.getByRole('button', { name: 'Ask for a rematch' }).click();
-    await expect(host.getByRole('dialog')).toContainText('Jo wants a rematch');
-    await host.getByRole('button', { name: 'Play again' }).click();
-    await expect(guest.locator('.heading small')).toContainText('round 2');
+    // Rematch: both must tap; the room creator picks the next level first.
+    await guest.getByRole('button', { name: 'Rematch' }).click();
+    await expect(guest.locator('#rematch')).toHaveText('Waiting for Sam…');
+    await expect(host.getByRole('dialog')).toContainText('Jo is ready for a rematch');
+    await host.getByRole('dialog').getByRole('button', { name: /Easy/ }).click();
+    await expect(guest.getByRole('dialog')).toContainText('Next level: 2 Easy');
+    await host.getByRole('button', { name: 'Rematch' }).click();
+    await expect(guest.locator('.heading small')).toContainText('Easy, round 2');
+    await expect(host.locator('.heading small')).toContainText('Easy, round 2');
+    await expect(guest.getByRole('dialog')).toHaveCount(0);
   });
 
   test('a dead room link explains what to do', async ({ page }) => {
@@ -142,5 +145,18 @@ test.describe('two-player race', () => {
     await page.goto('/#room=ABCDEFGHJK');
     // Local test transport never answers; the real one reports "room not found".
     await expect(page.getByRole('status')).toContainText('Connecting');
+  });
+});
+
+test.describe('sorting rule and big levels', () => {
+  test('practice level 5 has 9 rods on two shelves on a phone, and a sorted rod shows a tick', async ({ page }) => {
+    await unlock(page);
+    await page.getByRole('button', { name: /Practice/ }).click();
+    await expect(page.getByRole('button', { name: /Expert/ })).toContainText('8 colours, 7 rings each, only 1 spare rod');
+    await page.getByRole('button', { name: /Expert/ }).click();
+    await expect(page.locator('.rod')).toHaveCount(9, { timeout: 30_000 });
+    await expect(page.locator('.shelf')).toHaveCount(2);
+    // Every rod is reachable with a tap.
+    for (const rod of await page.locator('.rod').all()) await expect(rod).toBeInViewport();
   });
 });

@@ -1,16 +1,24 @@
 # Colour Stack
 
-A private family game based on the Color Stack Challenge board game. Move rings between rods until your rods match the card. Only the top ring on a rod can move, and each rod holds a limited number of rings.
+A private family colour-sorting game inspired by the Color Stack Challenge board game. Move rings between rods until every rod holds just one colour (any colour can end up on any rod). Only the top ring on a rod can move, and each rod holds a limited number of rings. A finished rod gets a tick.
 
 ## Ways to play
 
-- **Race someone:** tap *Race someone*, then *Send invite link*. When the other player opens it, pick a level and tap *Start race*. You both get the same puzzle after a 3-second countdown, and you can watch each other's board live. First to match the card wins. The score carries over between rematches.
-- **Daily challenge:** one puzzle a day, the same for everyone. You win by matching the card in par moves or fewer. It gets harder towards the weekend (Monday Easy, Saturday and Sunday Expert).
-- **Practice:** any of the 5 levels: Warm-up, Easy, Tricky, Hard and Expert.
+- **Race someone:** tap *Race someone*, then *Send invite link*. When the other player opens it, pick a level and tap *Start race*. You both get the same puzzle after a 3-second countdown, and you can watch each other's board live. First to sort every rod wins. After a race, both players tap **Rematch**; the player who created the room can pick the next level first. The score carries over.
+- **Daily challenge:** one puzzle a day, the same for everyone. You win by sorting it in par moves or fewer. It gets harder towards the weekend (Monday Easy, Saturday and Sunday Expert).
+- **Practice:** any of the 5 levels:
 
-**Stars:** 3 stars for solving in par moves or fewer (par is the proven minimum), 2 stars for slightly over par, and 1 star for any other solve. The stars next to the move counter show what you're still on track for.
+| Level | Colours | Rings each | Spare rods |
+| --- | --- | --- | --- |
+| 1 Warm-up | 3 | 3 | 1 |
+| 2 Easy | 4 | 4 | 2 |
+| 3 Tricky | 5 | 5 | 2 |
+| 4 Hard | 6 | 6 | 2 |
+| 5 Expert | 8 | 7 | 1 |
 
-**Controls:** tap a rod to lift its top ring, then tap the rod where it should go. You can also swipe from one rod to another. On a keyboard, number keys 1–7 pick rods and Esc puts a ring back. Every colour also has a shape (circle, triangle, square, diamond or cross), so the game works for colour-blind players.
+**Stars:** 3 stars for solving in par moves or fewer (par is the proven minimum on small levels, and the best solution the computer found on big ones), 2 stars for slightly over par, and 1 star for any other solve. The stars next to the move counter show what you're still on track for.
+
+**Controls:** tap a rod to lift its top ring, then tap the rod where it should go. You can also swipe from one rod to another. On a keyboard, number keys 1–7 pick rods and Esc puts a ring back. Every colour also has its own shape (circle, triangle, square, diamond, cross, star, heart or ring), so the game works for colour-blind players.
 
 ## Privacy
 

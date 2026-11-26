@@ -1,4 +1,4 @@
-import { canMove, type Board, type Rods } from '../engine/board';
+import { canMove, isRodComplete, type Board } from '../engine/board';
 import { h, reducedMotion } from './dom';
 import { COLOUR_NAMES, ringEl } from './rings';
 
@@ -21,17 +21,11 @@ export class BoardView {
 
   constructor(
     board: Board,
-    private target: Rods,
     private onMove: (from: number, to: number) => void,
   ) {
     this.board = board;
-    this.rodsEl = h('div.rods');
-    this.el = h(
-      'div.table',
-      { style: `--rods:${board.rods.length};--cap:${board.capacity}` },
-      this.rodsEl,
-      h('div.tabletop'),
-    );
+    this.rodsEl = h('div.shelves');
+    this.el = h('div.table', { style: `--cap:${board.capacity}` }, this.rodsEl);
     this.rodsEl.addEventListener('pointerdown', this.pointerDown);
     // Keyboard activation (Enter/Space) fires click with detail 0 and no pointer events.
     this.rodsEl.addEventListener('click', (ev) => {
@@ -40,13 +34,25 @@ export class BoardView {
     });
     window.addEventListener('pointerup', this.pointerUp);
     window.addEventListener('keydown', this.keyDown);
+    window.addEventListener('resize', this.onResize);
     this.render();
   }
 
   destroy(): void {
     window.removeEventListener('pointerup', this.pointerUp);
     window.removeEventListener('keydown', this.keyDown);
+    window.removeEventListener('resize', this.onResize);
   }
+
+  /** Big boards wrap onto two shelves on narrow screens so rings stay tappable. */
+  private rows(): number {
+    return this.board.rods.length > 7 && window.innerWidth < 700 ? 2 : 1;
+  }
+
+  private lastRows = 0;
+  private onResize = (): void => {
+    if (this.rows() !== this.lastRows) this.render();
+  };
 
   setLocked(locked: boolean): void {
     this.locked = locked;
@@ -127,7 +133,7 @@ export class BoardView {
   }
 
   private shake(i: number): void {
-    const rod = this.rodsEl.children[i] as HTMLElement | undefined;
+    const rod = this.rodsEl.querySelector<HTMLElement>(`.rod[data-rod="${i}"]`);
     if (!rod || reducedMotion()) return;
     rod.animate(
       [{ transform: 'translateX(0)' }, { transform: 'translateX(-5px)' }, { transform: 'translateX(5px)' }, { transform: 'translateX(0)' }],
@@ -155,30 +161,37 @@ export class BoardView {
   private render(): void {
     const { rods, capacity } = this.board;
     const focused = this.rodAt(document.activeElement);
-    this.rodsEl.replaceChildren(
-      ...rods.map((rod, i) => {
-        const tgt = this.target[i]!;
-        const done = rod.length === tgt.length && rod.every((c, j) => c === tgt[j]);
-        const top = rod.at(-1);
-        const stack = h('span.stack', {}, ...rod.map((c) => ringEl(c)));
-        if (this.selected === i) {
-          const lifted = stack.lastElementChild as HTMLElement;
-          lifted.classList.add('lifted');
-          lifted.style.setProperty('--lift', String(capacity - rod.length + 1));
-        }
-        const label =
-          `Rod ${i + 1}: ${rod.length} of ${capacity} rings` +
-          (top !== undefined ? `, top ${COLOUR_NAMES[top]}` : ', empty') +
-          (done ? ', matches the card' : '');
-        return h(
-          `button.rod${this.selected === i ? '.selected' : ''}${done ? '.done' : ''}`,
-          { type: 'button', 'data-rod': i, 'aria-label': label, 'aria-pressed': this.selected === i ? 'true' : 'false' },
-          h('span.pole'),
-          stack,
-          h('span.match', { 'aria-hidden': 'true' }),
-        );
-      }),
-    );
-    if (focused !== null) (this.rodsEl.children[focused] as HTMLElement | undefined)?.focus();
+    const rows = this.rows();
+    this.lastRows = rows;
+    const perRow = Math.ceil(rods.length / rows);
+    this.el.style.setProperty('--cols', String(perRow));
+    this.el.style.setProperty('--rows', String(rows));
+    const buttons = rods.map((rod, i) => {
+      const done = isRodComplete(rod, capacity);
+      const top = rod.at(-1);
+      const stack = h('span.stack', {}, ...rod.map((c) => ringEl(c)));
+      if (this.selected === i) {
+        const lifted = stack.lastElementChild as HTMLElement;
+        lifted.classList.add('lifted');
+        lifted.style.setProperty('--lift', String(capacity - rod.length + 1));
+      }
+      const label =
+        `Rod ${i + 1}: ${rod.length} of ${capacity} rings` +
+        (top !== undefined ? `, top ${COLOUR_NAMES[top]}` : ', empty') +
+        (done ? ', complete' : '');
+      return h(
+        `button.rod${this.selected === i ? '.selected' : ''}${done ? '.done' : ''}`,
+        { type: 'button', 'data-rod': i, 'aria-label': label, 'aria-pressed': this.selected === i ? 'true' : 'false' },
+        h('span.pole'),
+        stack,
+        h('span.match', { 'aria-hidden': 'true' }),
+      );
+    });
+    const shelves: HTMLElement[] = [];
+    for (let r = 0; r < rows; r++) {
+      shelves.push(h('div.shelf', {}, h('div.rods', {}, ...buttons.slice(r * perRow, (r + 1) * perRow)), h('div.tabletop')));
+    }
+    this.rodsEl.replaceChildren(...shelves);
+    if (focused !== null) this.rodsEl.querySelector<HTMLElement>(`.rod[data-rod="${focused}"]`)?.focus();
   }
 }
