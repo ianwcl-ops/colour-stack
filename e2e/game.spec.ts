@@ -11,6 +11,8 @@ async function unlock(page: Page) {
 
 /** Plays the optimal solution by actually tapping the rods, like a person would. */
 async function solveByTapping(page: Page) {
+  // Background tabs pause animation frames; act like the player picked up this device.
+  await page.bringToFront();
   const moves = await page.evaluate(() => (window as unknown as { __cs: { solution(): [number, number][] } }).__cs.solution());
   for (const [from, to] of moves) {
     await page.click(`.rod[data-rod="${from}"]`);
@@ -82,68 +84,140 @@ test.describe('single player', () => {
   });
 });
 
-test.describe('two-player race', () => {
-  test('both players race the same puzzle, watch each other, and get the same result', async ({ context }) => {
-    const host = await context.newPage();
-    await unlock(host);
-    await host.getByRole('button', { name: /Race someone/ }).click();
-    await host.fill('#name', 'Sam');
-    await host.getByRole('button', { name: 'Continue' }).click();
-    await expect(host.getByRole('status')).toContainText('Waiting for player 2');
-    const link = (await host.locator('.link-text').textContent())!;
+type Sol = { __cs: { solution(): [number, number][] } };
+
+async function openRoom(context: import('@playwright/test').BrowserContext, hostName: string) {
+  const host = await context.newPage();
+  await unlock(host);
+  await host.evaluate((n) => localStorage.setItem('cs.name', JSON.stringify(n)), hostName);
+  await host.reload();
+  await host.getByRole('button', { name: /Race someone/ }).click();
+  await expect(host.getByRole('status')).toContainText('Waiting for players');
+  const link = (await host.locator('.link-text').textContent())!;
+  return { host, link };
+}
+
+async function joinRoom(context: import('@playwright/test').BrowserContext, link: string, name: string) {
+  const page = await context.newPage();
+  await page.goto('/');
+  await page.evaluate((n) => localStorage.setItem('cs.name', JSON.stringify(n)), name);
+  await page.goto(link);
+  return page;
+}
+
+test.describe('multiplayer races', () => {
+  test('2 players: same puzzle, live view, placings, and a both-tap rematch', async ({ context }) => {
+    const { host, link } = await openRoom(context, 'Sam');
     expect(link).toMatch(/#room=[A-Z2-9]{10}$/);
+    await expect(host.locator('#start-race')).toBeDisabled();
 
-    const guest = await context.newPage();
-    await guest.goto('/');
-    await guest.evaluate(() => localStorage.setItem('cs.name', JSON.stringify('Jo')));
-    await guest.goto(link);
-    await expect(guest.getByRole('status')).toContainText('Connected to Sam');
-    await expect(host.getByRole('status')).toContainText('Jo is here');
+    const guest = await joinRoom(context, link, 'Jo');
+    await expect(guest.getByRole('status')).toContainText('Waiting for Sam to start');
+    await expect(host.getByRole('status')).toContainText('2 players in');
+    await expect(host.locator('#start-race')).toBeEnabled();
 
-    // Host picks level 1; guest sees it.
     await host.getByRole('button', { name: /Warm-up/ }).click();
     await expect(guest.locator('.lede')).toContainText('Warm-up');
-
     await host.click('#start-race');
-    await expect(host.locator('.count-num')).toBeVisible();
-    await expect(guest.locator('.count-num')).toBeVisible();
     await expect(host.locator('.countdown')).toHaveCount(0, { timeout: 8000 });
     await expect(guest.locator('.countdown')).toHaveCount(0, { timeout: 8000 });
+    expect(await host.locator('.shelves').innerHTML()).toBe(await guest.locator('.shelves').innerHTML());
 
-    // Same puzzle on both screens.
-    expect(await host.locator('.rods').innerHTML()).toBe(await guest.locator('.rods').innerHTML());
+    const [first] = await guest.evaluate(() => (window as unknown as Sol).__cs.solution());
+    await guest.click(`.rod[data-rod="${first![0]}"]`);
+    await guest.click(`.rod[data-rod="${first![1]}"]`);
+    await expect(host.locator('[data-player="Jo"] .status')).toHaveText('1 moves');
 
-    // Guest makes a move: host's opponent view updates live.
-    const firstMoves = await guest.evaluate(() => (window as unknown as { __cs: { solution(): [number, number][] } }).__cs.solution());
-    const [from, to] = firstMoves[0]!;
-    await guest.click(`.rod[data-rod="${from}"]`);
-    await guest.click(`.rod[data-rod="${to}"]`);
-    await expect(host.locator('.opponent strong')).toHaveText('1');
-
-    // Host solves first and wins on both screens.
     await solveByTapping(host);
-    await expect(host.getByRole('dialog')).toContainText('You win!');
-    await expect(host.locator('.rod.done').first()).toBeVisible();
-    await expect(guest.getByRole('dialog')).toContainText('Sam wins');
-    await expect(guest.getByRole('dialog')).toContainText('Jo 0, Sam 1');
+    await expect(host.locator('.note')).toContainText('You came 1st! Waiting for Jo');
+    await expect(guest.locator('[data-player="Sam"] .status')).toHaveText('1st');
+    await solveByTapping(guest);
 
-    // Rematch: both must tap; the room creator picks the next level first.
-    await guest.getByRole('button', { name: 'Rematch' }).click();
-    await expect(guest.locator('#rematch')).toHaveText('Waiting for Sam…');
-    await expect(host.getByRole('dialog')).toContainText('Jo is ready for a rematch');
+    await expect(host.getByRole('dialog')).toContainText('You win!');
+    await expect(guest.getByRole('dialog')).toContainText('You came 2nd');
+    await expect(guest.locator('.standings')).toContainText('Sam');
+
+    await guest.locator('#rematch').click();
+    await expect(guest.locator('#rematch')).toHaveText('Waiting for the others…');
+    await expect(host.getByRole('dialog')).toContainText('Ready: Jo. Waiting for Sam.');
     await host.getByRole('dialog').getByRole('button', { name: /Easy/ }).click();
     await expect(guest.getByRole('dialog')).toContainText('Next level: 2 Easy');
-    await host.getByRole('button', { name: 'Rematch' }).click();
+    await host.locator('#rematch').click();
     await expect(guest.locator('.heading small')).toContainText('Easy, round 2');
     await expect(host.locator('.heading small')).toContainText('Easy, round 2');
-    await expect(guest.getByRole('dialog')).toHaveCount(0);
   });
 
-  test('a dead room link explains what to do', async ({ page }) => {
+  test('3 players: everyone gets a place and points; giving up scores nothing', async ({ context }) => {
+    const { host, link } = await openRoom(context, 'Ian');
+    const keira = await joinRoom(context, link, 'Keira');
+    const jake = await joinRoom(context, link, 'Jake');
+    await expect(host.getByRole('status')).toContainText('3 players in');
+    await expect(jake.locator('.players')).toContainText('Keira');
+    await host.bringToFront();
+    await host.getByRole('button', { name: /Warm-up/ }).click();
+    await host.click('#start-race');
+    for (const p of [host, keira, jake]) await expect(p.locator('.countdown')).toHaveCount(0, { timeout: 8000 });
+    await expect(keira.locator('.opponents [data-player]')).toHaveCount(2);
+
+    await solveByTapping(keira);
+    await expect(keira.locator('.note')).toContainText('You came 1st! Waiting for Ian and Jake');
+    await solveByTapping(host);
+    await jake.bringToFront();
+    await jake.getByRole('button', { name: 'Give up' }).click();
+    await jake.getByRole('button', { name: 'Tap again to give up' }).click();
+
+    for (const p of [host, keira, jake]) await expect(p.getByRole('dialog')).toBeVisible();
+    await expect(keira.getByRole('dialog')).toContainText('You win!');
+    await expect(host.getByRole('dialog')).toContainText('You came 2nd');
+    await expect(jake.getByRole('dialog')).toContainText('Race over');
+    const rows = jake.locator('.standings tbody tr');
+    await expect(rows.nth(0)).toContainText('1stKeira');
+    await expect(rows.nth(0).locator('.pts')).toHaveText('3');
+    await expect(rows.nth(1).locator('.pts')).toHaveText('2');
+    await expect(rows.nth(2)).toContainText('gave up');
+    await expect(rows.nth(2).locator('.pts')).toHaveText('0');
+
+    // Rematch only starts once all three have tapped.
+    await keira.bringToFront();
+    await keira.locator('#rematch').click();
+    await host.bringToFront();
+    await host.locator('#rematch').click();
+    await expect(jake.getByRole('dialog')).toContainText('Ready: Ian and Keira. Waiting for Jake.');
+    await jake.bringToFront();
+    await jake.locator('#rematch').click();
+    for (const p of [host, keira, jake]) await expect(p.locator('.heading small')).toContainText('round 2');
+  });
+
+  test('a 5th player is turned away, and someone joining mid-race plays the next round', async ({ context }) => {
+    const { host, link } = await openRoom(context, 'Ian');
+    const a = await joinRoom(context, link, 'Keira');
+    await expect(host.getByRole('status')).toContainText('2 players in');
+    await host.bringToFront();
+    await host.getByRole('button', { name: /Warm-up/ }).click();
+    await host.click('#start-race');
+    await expect(a.locator('.countdown')).toHaveCount(0, { timeout: 8000 });
+
+    const late = await joinRoom(context, link, 'Jake');
+    await expect(late.getByRole('status')).toContainText('A race is on right now');
+    const b = await joinRoom(context, link, 'Ly');
+    await expect(host.locator('.opponents [data-player]')).toHaveCount(1); // late joiners aren't racing
+    const fifth = await joinRoom(context, link, 'Nana');
+    await expect(fifth.getByRole('heading', { name: 'This race is full' })).toBeVisible();
+
+    await solveByTapping(host);
+    await solveByTapping(a);
+    await a.bringToFront();
+    await a.locator('#rematch').click();
+    await host.bringToFront();
+    await host.locator('#rematch').click();
+    for (const p of [late, b]) await expect(p.locator('.heading small')).toContainText('round 2', { timeout: 10_000 });
+    await expect(host.locator('.opponents [data-player]')).toHaveCount(3);
+  });
+
+  test('a dead room link shows it is connecting (the real transport then says the room was not found)', async ({ page }) => {
     await unlock(page);
     await page.evaluate(() => localStorage.setItem('cs.name', JSON.stringify('Jo')));
     await page.goto('/#room=ABCDEFGHJK');
-    // Local test transport never answers; the real one reports "room not found".
     await expect(page.getByRole('status')).toContainText('Connecting');
   });
 });

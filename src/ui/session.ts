@@ -14,8 +14,10 @@ export interface SessionOptions {
   onMove?: (rods: Rods, moves: number) => void;
   onSolved: (moves: number, ms: number) => void;
   allowReset: boolean;
-  /** Extra panel beside the target card, e.g. the opponent's live board. */
+  /** Panel above the rods, e.g. opponents' live progress. */
   side?: HTMLElement;
+  /** Races only: lets a stuck player stop (no points). */
+  onGiveUp?: () => void;
 }
 
 /** One puzzle being played: header, target card, rods and move counter. */
@@ -28,6 +30,8 @@ export class GameSession {
   private movesEl = h('strong.count', {}, '0');
   private starsEl = h('span.live-stars', { 'aria-label': '3 stars on track' });
   private finished = false;
+  private footer: HTMLElement;
+  private note = h('p.hint', {}, 'Tap a rod to lift its top ring, then tap where it goes.');
 
   constructor(private o: SessionOptions) {
     this.board = o.puzzle.start;
@@ -54,15 +58,44 @@ export class GameSession {
       ),
       o.side ? h('section.cards', {}, o.side) : h('p.goal', {}, 'Sort the rings so every rod holds just one colour.'),
       this.view.el,
-      h(
+      (this.footer = h(
         'footer.actions',
         {},
         o.allowReset ? h('button.ghost', { type: 'button', onclick: () => this.reset() }, 'Start over') : null,
-        h('p.hint', {}, 'Tap a rod to lift its top ring, then tap where it goes.'),
-      ),
+        o.onGiveUp ? this.giveUpButton(o.onGiveUp) : null,
+        this.note,
+      )),
     );
     this.paintStars();
     if (E2E) (window as unknown as { __cs: unknown }).__cs = { solution: () => solveForLevel(this.board, p.level).moves };
+  }
+
+  /** Two taps, so a stray tap can't end someone's race. */
+  private giveUpButton(onGiveUp: () => void): HTMLElement {
+    let armed = false;
+    const b = h<'button'>('button.ghost.give-up', {
+      type: 'button',
+      onclick: () => {
+        if (!armed) {
+          armed = true;
+          b.textContent = 'Tap again to give up';
+          setTimeout(() => {
+            armed = false;
+            b.textContent = 'Give up';
+          }, 3000);
+          return;
+        }
+        this.finished = true;
+        this.view.setLocked(true);
+        onGiveUp();
+      },
+    }, 'Give up');
+    return b;
+  }
+
+  /** Replace the footer with a status line, e.g. after finishing while others race on. */
+  setNote(text: string): void {
+    this.footer.replaceChildren(h('p.note', { role: 'status' }, text));
   }
 
   start(): void {

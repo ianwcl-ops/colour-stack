@@ -4,7 +4,7 @@ A private family colour-sorting game inspired by the Color Stack Challenge board
 
 ## Ways to play
 
-- **Race someone:** tap *Race someone*, then *Send invite link*. When the other player opens it, pick a level and tap *Start race*. You both get the same puzzle after a 3-second countdown, and you can watch each other's board live. First to sort every rod wins. After a race, both players tap **Rematch**; the player who created the room can pick the next level first. The score carries over.
+- **Race someone (2–4 players):** tap *Race someone*, then *Send invite link* and share it with up to 3 others. The room creator picks a level and taps *Start race* whenever 2 or more players are in. Everyone gets the same puzzle after a 3-second countdown and can watch the others live (mini boards on bigger screens, progress bars on phones). The race keeps going until everyone has finished or given up: 1st, 2nd, 3rd and 4th score 3, 2, 1 and 0 points, and points add up across rounds. Someone who opens the link mid-race joins the next round. A 5th person is told the room is full. After a race, everyone taps **Rematch**; the next round starts when all have tapped, and the room creator can pick the level first.
 - **Daily challenge:** one puzzle a day, the same for everyone. You win by sorting it in par moves or fewer. It gets harder towards the weekend (Monday Easy, Saturday and Sunday Expert).
 - **Practice:** any of the 5 levels:
 
@@ -50,6 +50,6 @@ Process: TypeScript strict mode, with tests written before code for the game rul
 | Area | Where |
 | --- | --- |
 | Game rules, generator, A* solver for par | `src/engine/` |
-| Two-player protocol (host decides the winner) | `src/net/match.ts` |
+| Multiplayer protocol (room creator relays moves and decides placings) | `src/net/match.ts` |
 | PeerJS and test transports | `src/net/transport.ts` |
 | Screens and interaction | `src/main.ts`, `src/ui/` |

@@ -8,11 +8,24 @@ import type { Puzzle } from './engine/generate';
 import { getLevel, LEVELS } from './engine/levels';
 import { makePuzzle } from './engine/make-puzzle';
 import { stars } from './engine/score';
-import { createMatch, reduce, type MatchEvent, type MatchState, type PuzzleData } from './net/match';
-import type { Transport } from './net/transport';
+import {
+  allReady,
+  canStart,
+  createMatch,
+  HOST_ID,
+  MAX_PLAYERS,
+  me,
+  reduce,
+  type MatchEvent,
+  type MatchState,
+  type Out,
+  type PuzzleData,
+} from './net/match';
+import type { GuestTransport, HostTransport, TransportError } from './net/transport';
 import { store } from './storage';
 import { formatTime, h, mount, reducedMotion } from './ui/dom';
-import { miniBoard, ringEl } from './ui/rings';
+import { OpponentsPanel, ordinal } from './ui/opponents';
+import { ringEl } from './ui/rings';
 import { GameSession } from './ui/session';
 
 const app = document.getElementById('app')!;
@@ -113,7 +126,7 @@ function home(): void {
           'button.primary.big',
           { type: 'button', onclick: () => withName(hostRace) },
           h('span', {}, 'Race someone'),
-          h('small', {}, 'Same puzzle, live, head to head'),
+          h('small', {}, '2 to 4 players, same puzzle, live'),
         ),
         h(
           'button.big.daily',
@@ -301,126 +314,169 @@ async function daily(): Promise<void> {
   });
 }
 
-/* ---------- Race ---------- */
+/* ---------- Race (2–4 players) ---------- */
 
 function hostRace(): void {
   startRace('host', newRoomCode());
 }
 
+const listNames = (names: string[]): string =>
+  names.length <= 1 ? (names[0] ?? '') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+
 function startRace(role: 'host' | 'guest', code: string): void {
   let state: MatchState = createMatch(role, store.name(), store.practiceLevel() > 1 ? store.practiceLevel() : 2);
   let session: GameSession | null = null;
-  let oppMini: HTMLElement | null = null;
-  let oppMoves: HTMLElement | null = null;
+  let panel: OpponentsPanel | null = null;
   let sheetEl: HTMLElement | null = null;
   let error: string | null = null;
   let left = false;
+  let starting = false;
   const link = roomLink(location.href, code);
 
-  const conn: Transport = (role === 'host' ? transport.host : transport.join)(code, {
-    onOpen: () => dispatch({ kind: 'connected' }),
-    onMessage: (msg) => dispatch({ kind: 'recv', msg: msg as never }),
-    onClose: () => dispatch({ kind: 'disconnected' }),
-    onError: (reason) => {
-      error =
-        reason === 'room-not-found'
-          ? 'This race has ended or hasn’t started yet. Ask for a fresh link.'
-          : reason === 'room-taken'
-            ? 'That room code is in use. Go back and start a new race.'
-            : 'Couldn’t connect. Check your internet connection and try again.';
-      paint(state, state);
-    },
-  });
+  const onError = (reason: TransportError): void => {
+    error =
+      reason === 'room-not-found'
+        ? 'This race has ended or hasn’t started yet. Ask for a fresh link.'
+        : reason === 'room-taken'
+          ? 'That room code is in use. Go back and start a new race.'
+          : 'Couldn’t connect. Check your internet connection and try again.';
+    paint(state, state);
+  };
 
+  const hostConn: HostTransport | null =
+    role === 'host'
+      ? transport.host(code, {
+          onJoin: (id) => dispatch({ kind: 'peer-joined', id }),
+          onMessage: (id, msg) => dispatch({ kind: 'recv', from: id, msg: msg as never }),
+          onLeave: (id) => dispatch({ kind: 'peer-left', id }),
+          onError,
+        })
+      : null;
+  const guestConn: GuestTransport | null =
+    role === 'guest'
+      ? transport.join(code, {
+          onOpen: () => dispatch({ kind: 'connected' }),
+          onMessage: (msg) => dispatch({ kind: 'recv', from: 'host', msg: msg as never }),
+          onClose: () => dispatch({ kind: 'disconnected' }),
+          onError,
+        })
+      : null;
+
+  const closeConn = (): void => {
+    hostConn?.close();
+    guestConn?.close();
+  };
+  window.addEventListener('pagehide', closeConn);
   const leave = (): void => home();
+
+  function send(outs: Out[]): void {
+    for (const o of outs) {
+      if (hostConn) {
+        if (o.to === 'all') hostConn.broadcast(o.msg, o.except);
+        else hostConn.send(o.to, o.msg);
+        if (o.close) hostConn.kick(o.to);
+      } else guestConn?.send(o.msg);
+    }
+  }
 
   function dispatch(e: MatchEvent): void {
     if (left) return;
     const prev = state;
     const r = reduce(state, e);
     state = r.state;
-    r.outbox.forEach((m) => conn.send(m));
+    send(r.outbox);
     paint(prev, state);
   }
 
   async function newRound(): Promise<void> {
-    const p = await makePuzzle(`${code}-${state.round + 1}-${Date.now()}`, state.level);
-    dispatch({ kind: 'start-round', puzzle: toData(p) });
+    if (starting) return;
+    starting = true;
+    try {
+      const p = await makePuzzle(`${code}-${state.round + 1}-${Date.now()}`, state.level);
+      dispatch({ kind: 'start-round', puzzle: toData(p) });
+    } finally {
+      starting = false;
+    }
   }
 
-  function lobby(s: MatchState): HTMLElement {
-    const copyBtn = h<'button'>('button.primary', {
+  const inviteButton = (label = 'Send invite link'): HTMLButtonElement => {
+    const b = h<'button'>('button.primary', {
       type: 'button',
       onclick: async () => {
         try {
-          if (navigator.share) await navigator.share({ title: 'Colour Stack race', text: `${s.myName} wants a Colour Stack race`, url: link });
+          if (navigator.share) await navigator.share({ title: 'Colour Stack race', text: `${me(state).name} wants a Colour Stack race`, url: link });
           else {
             await navigator.clipboard.writeText(link);
-            copyBtn.textContent = 'Link copied';
+            b.textContent = 'Link copied';
           }
         } catch {
           /* share sheet dismissed */
         }
       },
-    }, 'Send invite link');
+    }, label);
+    return b;
+  };
 
-    const levelPicker =
-      s.role === 'host'
-        ? h(
-            'fieldset.level-pick',
-            {},
-            h('legend', {}, 'Level'),
-            ...LEVELS.map((l) =>
-              h(
-                `button.chip${l.id === s.level ? '.on' : ''}`,
-                { type: 'button', 'aria-pressed': l.id === s.level ? 'true' : 'false', onclick: () => dispatch({ kind: 'set-level', level: l.id }) },
-                h('b', {}, String(l.id)),
-                h('span', {}, l.name),
-              ),
-            ),
-          )
-        : h('p.lede', {}, `Level ${s.level}: ${getLevel(s.level).name}`);
+  const levelPicker = (s: MatchState, legend: string): HTMLElement =>
+    h(
+      'fieldset.level-pick',
+      {},
+      h('legend', {}, legend),
+      ...LEVELS.map((l) =>
+        h(
+          `button.chip${l.id === s.level ? '.on' : ''}`,
+          { type: 'button', 'aria-pressed': l.id === s.level ? 'true' : 'false', onclick: () => dispatch({ kind: 'set-level', level: l.id }) },
+          h('b', {}, String(l.id)),
+          h('span', {}, l.name),
+        ),
+      ),
+    );
 
-    const status = error
-      ? h('p.error', { role: 'alert' }, error)
-      : s.oppPresent
-        ? h('p.status.ready', { role: 'status' }, s.role === 'host' ? `${s.oppName} is here and ready.` : `Connected to ${s.oppName}. Waiting for them to start.`)
-        : h('p.status', { role: 'status' }, s.role === 'host' ? 'Waiting for player 2 to open the link…' : 'Connecting…');
+  function lobby(s: MatchState): HTMLElement {
+    const present = s.players.filter((p) => p.present);
+    const host = s.players.find((p) => p.id === HOST_ID);
+    const slots = Array.from({ length: MAX_PLAYERS }, (_, i) => {
+      const p = present[i];
+      if (!p) return h('li.player.empty', {}, h('span.avatar', {}, '?'), h('span', {}, 'Open spot'));
+      return h(
+        `li.player${p.id === s.myId ? '.me' : ''}`,
+        {},
+        h('span.avatar', {}, p.name.slice(0, 1).toUpperCase()),
+        h('span', {}, p.id === s.myId ? `${p.name} (you)` : p.name),
+        p.id === HOST_ID ? h('small', {}, 'Room creator') : null,
+        p.points ? h('small', {}, `${p.points} pts`) : null,
+      );
+    });
+
+    let status: HTMLElement;
+    if (error) status = h('p.error', { role: 'alert' }, error);
+    else if (s.role === 'host')
+      status =
+        present.length < 2
+          ? h('p.status', { role: 'status' }, 'Waiting for players to open the link…')
+          : h('p.status.ready', { role: 'status' }, `${present.length} players in. Start whenever you’re ready.`);
+    else if (!s.myId) status = h('p.status', { role: 'status' }, 'Connecting…');
+    else if (s.raceInProgress) status = h('p.status', { role: 'status' }, 'A race is on right now. You’ll join the next one.');
+    else status = h('p.status.ready', { role: 'status' }, `You’re in. Waiting for ${host?.name ?? 'the room creator'} to start.`);
 
     return h(
       'main.screen.lobby',
       {},
-      h('header.bar', {}, h('button.back', { type: 'button', onclick: leave }, 'Leave'), h('div.heading', {}, h('span', {}, 'Race'))),
-      h(
-        'section.versus',
-        {},
-        h('div.player.me', {}, h('span.avatar', {}, s.myName.slice(0, 1).toUpperCase()), h('span', {}, s.myName)),
-        h('span.vs', {}, 'vs'),
-        h(
-          `div.player${s.oppPresent ? '' : '.empty'}`,
-          {},
-          h('span.avatar', {}, s.oppPresent ? s.oppName.slice(0, 1).toUpperCase() : '?'),
-          h('span', {}, s.oppPresent ? s.oppName : 'Player 2'),
-        ),
-      ),
-      s.score.host + s.score.guest > 0
-        ? h('p.score', {}, `Score: ${s.myName} ${s.score[s.role]}, ${s.oppName} ${s.score[s.role === 'host' ? 'guest' : 'host']}`)
-        : null,
+      h('header.bar', {}, h('button.back', { type: 'button', onclick: leave }, 'Leave'), h('div.heading', {}, h('span', {}, 'Race'), h('small', {}, `${present.length} of ${MAX_PLAYERS} players`))),
+      h('ul.players', { 'aria-label': 'Players' }, ...slots),
       status,
-      s.role === 'host' && !s.oppPresent && !error
-        ? h('div.invite', {}, h('p.help', {}, 'Only people with this link can join, and it works for this race only.'), copyBtn, h('code.link-text', {}, link))
+      s.role === 'host' && present.length < MAX_PLAYERS && !error
+        ? h('div.invite', {}, h('p.help', {}, `Send this link to up to ${MAX_PLAYERS - present.length} more. It only works for this room.`), inviteButton(), h('code.link-text', {}, link))
         : null,
-      levelPicker,
+      s.role === 'host' ? levelPicker(s, 'Level') : h('p.lede', {}, `Level ${s.level}: ${getLevel(s.level).name}`),
       s.role === 'host'
-        ? h('button.primary.big', { type: 'button', disabled: !s.oppPresent, onclick: () => void newRound(), id: 'start-race' }, h('span', {}, 'Start race'))
+        ? h(
+            'button.primary.big',
+            { type: 'button', disabled: !canStart(s) || starting, onclick: () => void newRound(), id: 'start-race' },
+            h('span', {}, present.length >= 2 ? `Start race with ${present.length} players` : 'Start race'),
+          )
         : null,
     );
-  }
-
-  function opponentPanel(s: MatchState): HTMLElement {
-    oppMini = h('div.opp-board', {}, miniBoard(s.opp.rods, s.puzzle!.start.capacity));
-    oppMoves = h('strong', {}, String(s.opp.moves));
-    return h('aside.opponent', { 'aria-label': `${s.oppName}'s board` }, oppMini, h('p', {}, h('span', {}, s.oppName), ' ', oppMoves, ' moves'));
   }
 
   function countdown(onGo: () => void): void {
@@ -443,74 +499,114 @@ function startRace(role: 'host' | 'guest', code: string): void {
     setTimeout(tick, 800);
   }
 
-  /** Result sheet with the rematch flow. Rebuilt whenever the match state changes. */
+  /** Waiting line shown after you finish while others are still going. */
+  function placedNote(s: MatchState): string {
+    const mine = me(s).result;
+    const still = s.players.filter((p) => p.present && p.inRound && !p.result).map((p) => p.name);
+    const head = mine?.gaveUp ? 'You gave up.' : mine?.place ? `You came ${ordinal(mine.place)}!` : 'Checking…';
+    return still.length ? `${head} Waiting for ${listNames(still)} to finish.` : head;
+  }
+
+  /** Standings and rematch. Rebuilt whenever the match state changes. */
   function results(s: MatchState, first: boolean): void {
-    const iWon = s.winner === s.role;
-    const mine = s.mySolve;
-    const level = getLevel(s.level);
+    const mine = me(s);
+    const ranked = s.players
+      .filter((p) => p.inRound)
+      .sort((a, b) => (a.result?.place ?? 99) - (b.result?.place ?? 99) || (b.present ? 1 : 0) - (a.present ? 1 : 0));
+    const rows = ranked.map((p) =>
+      h(
+        `tr${p.id === s.myId ? '.mine' : ''}`,
+        {},
+        h('td.place', {}, p.result?.place ? ordinal(p.result.place) : '–'),
+        h('th', { scope: 'row' }, p.name),
+        h('td', {}, p.result?.gaveUp ? 'gave up' : !p.present && !p.result ? 'left' : p.result ? `${p.result.moves} moves` : ''),
+        h('td.pts', {}, `${p.points}`),
+      ),
+    );
+    const table = h(
+      'table.standings',
+      {},
+      h('thead', {}, h('tr', {}, h('th', {}, ''), h('th', {}, 'Player'), h('th', {}, 'This round'), h('th', {}, 'Points'))),
+      h('tbody', {}, ...rows),
+    );
+
+    const needed = s.players.filter((p) => p.present && p.inRound);
+    const ready = needed.filter((p) => p.ready).map((p) => p.name);
+    const waiting = needed.filter((p) => !p.ready).map((p) => p.name);
+    const tooFew = s.players.filter((p) => p.present).length < 2;
+    const readiness = tooFew
+      ? h('p.status', { role: 'status' }, 'Everyone else has left. Invite more players to keep going.')
+      : ready.length
+        ? h('p.status.ready', { role: 'status' }, waiting.length ? `Ready: ${listNames(ready)}. Waiting for ${listNames(waiting)}.` : 'Everyone’s ready!')
+        : null;
 
     const rematch = h<'button'>(
       'button.primary',
-      { type: 'button', id: 'rematch', disabled: s.meReady, onclick: () => dispatch({ kind: 'request-rematch' }) },
-      s.meReady ? `Waiting for ${s.oppName}…` : 'Rematch',
+      { type: 'button', id: 'rematch', disabled: mine.ready || tooFew, onclick: () => dispatch({ kind: 'request-rematch' }) },
+      mine.ready ? 'Waiting for the others…' : 'Rematch',
     );
-    const readiness = s.oppReady
-      ? h('p.status.ready', { role: 'status' }, `${s.oppName} is ready for a rematch.`)
-      : s.meReady
-        ? h('p.status', { role: 'status' }, `Waiting for ${s.oppName} to tap Rematch.`)
-        : null;
-
-    const levelChoice =
+    const title = mine.result?.place === 1 ? 'You win!' : mine.result?.place ? `You came ${ordinal(mine.result.place)}` : 'Race over';
+    const extra =
       s.role === 'host'
-        ? h(
-            'fieldset.level-pick',
-            {},
-            h('legend', {}, 'Next level'),
-            ...LEVELS.map((l) =>
-              h(
-                `button.chip${l.id === s.level ? '.on' : ''}`,
-                { type: 'button', 'aria-pressed': l.id === s.level ? 'true' : 'false', onclick: () => dispatch({ kind: 'set-level', level: l.id }) },
-                h('b', {}, String(l.id)),
-                h('span', {}, l.name),
-              ),
-            ),
-          )
-        : h('p.help', {}, `Next level: ${level.id} ${level.name}. ${s.oppName} can change it.`);
+        ? levelPicker(s, 'Next level')
+        : h('p.help', {}, `Next level: ${s.level} ${getLevel(s.level).name}. The room creator can change it.`);
 
     const old = sheetEl;
     sheetEl = sheet(
-      iWon ? 'You win!' : `${s.oppName} wins`,
+      title,
       [
-        h('p.result', {}, iWon ? `You sorted it first${mine ? ` in ${mine.moves} moves (${formatTime(mine.ms)})` : ''}.` : `${s.oppName} sorted it first.`),
-        mine && s.puzzle ? starRow(stars(mine.moves, s.puzzle.par)) : null,
-        h('p.score', {}, `${s.myName} ${s.score[s.role]}, ${s.oppName} ${s.score[s.role === 'host' ? 'guest' : 'host']}`),
-        levelChoice,
+        mine.result?.place && s.puzzle ? starRow(stars(mine.result.moves, s.puzzle.par)) : null,
+        table,
+        extra,
         readiness,
       ],
-      [rematch, h('button.ghost', { type: 'button', onclick: leave }, 'Leave')],
+      [rematch, ...(s.role === 'host' && s.players.filter((p) => p.present).length < MAX_PLAYERS ? [inviteButton('Invite more players')] : []), h('button.ghost', { type: 'button', onclick: leave }, 'Leave')],
       first,
     );
     old?.remove();
-    sheetEl.classList.add(iWon ? 'won' : 'lost');
+    sheetEl.classList.add(mine.result?.place === 1 ? 'won' : 'lost');
+    sheetEl.querySelector('.sheet-actions button:nth-child(2).primary')?.classList.remove('primary');
     if (!first) sheetEl.querySelector('.sheet')?.classList.add('static');
+  }
+
+  function message(title: string, text: string): void {
+    sheetEl?.remove();
+    session?.destroy();
+    panel?.destroy();
+    session = null;
+    mount(app, h('main.screen.centre', {}, h('h2.title', {}, title), h('p.lede', {}, text), h('button.primary', { type: 'button', onclick: leave }, 'Home')));
   }
 
   function paint(prev: MatchState, s: MatchState): void {
     if (left) return;
-    // New round: build a fresh board and count down.
+    if (s.full) return message('This race is full', `A room holds up to ${MAX_PLAYERS} players. Ask the room creator to start a new race.`);
+    if (s.closed && !prev.closed) {
+      if (s.phase === 'lobby') return message('The room has closed', 'The room creator left. Ask them for a new link.');
+      const banner = h('div.banner', { role: 'alert' }, 'The room creator left.', h('button', { type: 'button', onclick: leave }, 'Home'));
+      document.body.querySelector('.banner')?.remove();
+      document.body.append(banner);
+      session?.lock();
+      return;
+    }
+
+    // New round: build a fresh board and count down together.
     if (s.phase === 'countdown' && (prev.phase !== 'countdown' || prev.round !== s.round)) {
       sheetEl?.remove();
       sheetEl = null;
       session?.destroy();
+      panel?.destroy();
+      panel = new OpponentsPanel(s);
+      const others = s.players.filter((p) => p.inRound && p.id !== s.myId).map((p) => p.name);
       session = new GameSession({
         puzzle: s.puzzle!,
-        heading: `Race vs ${s.oppName}`,
+        heading: others.length === 1 ? `Race vs ${others[0]}` : `${others.length + 1}-player race`,
         sub: `${getLevel(s.level).name}, round ${s.round}`,
         allowReset: false,
-        side: opponentPanel(s),
+        side: panel.el,
         onBack: leave,
         onMove: (rods, moves) => dispatch({ kind: 'local-move', rods, moves }),
         onSolved: (moves, ms) => dispatch({ kind: 'local-solved', moves, ms }),
+        onGiveUp: () => dispatch({ kind: 'give-up' }),
       });
       mount(app, session.el);
       countdown(() => {
@@ -521,16 +617,20 @@ function startRace(role: 'host' | 'guest', code: string): void {
     }
 
     if (s.phase === 'lobby') {
+      session?.destroy();
+      panel?.destroy();
+      session = null;
+      panel = null;
       mount(app, lobby(s));
       return;
     }
 
-    if (session && s.opp !== prev.opp && oppMini && oppMoves && s.puzzle) {
-      oppMini.replaceChildren(miniBoard(s.opp.rods, s.puzzle.start.capacity));
-      oppMoves.textContent = String(s.opp.moves);
-    }
+    panel?.update(s);
 
-    if (s.phase === 'waiting' && prev.phase !== 'waiting') session?.el.classList.add('waiting');
+    if ((s.phase === 'placed' || s.phase === 'waiting') && session) {
+      session.lock();
+      session.setNote(placedNote(s));
+    }
 
     if (s.phase === 'finished' && prev.phase !== 'finished') {
       session?.lock();
@@ -541,26 +641,20 @@ function startRace(role: 'host' | 'guest', code: string): void {
       results(s, false);
     }
 
-    // Both tapped Rematch: the room creator deals the next puzzle.
-    if (s.role === 'host' && s.bothReady && !prev.bothReady) {
+    // Everyone tapped Rematch: the room creator deals the next puzzle.
+    if (s.role === 'host' && allReady(s) && !allReady(prev)) {
       sheetEl?.querySelector('.sheet')?.append(h('p.status', { role: 'status' }, 'Shuffling the rings…'));
       void newRound();
-    }
-
-    if (!s.oppPresent && prev.oppPresent) {
-      const banner = h('div.banner', { role: 'alert' }, `${s.oppName} left the game.`, h('button', { type: 'button', onclick: leave }, 'Home'));
-      sheetEl?.remove();
-      document.body.querySelector('.banner')?.remove();
-      document.body.append(banner);
-      session?.lock();
     }
   }
 
   show(lobby(state));
   cleanup = () => {
     left = true;
-    conn.close();
+    window.removeEventListener('pagehide', closeConn);
+    closeConn();
     session?.destroy();
+    panel?.destroy();
     sheetEl?.remove();
     document.querySelector('.banner')?.remove();
   };

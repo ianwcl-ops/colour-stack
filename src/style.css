@@ -357,3 +357,57 @@ h1, h2 { margin: 0; line-height: 1.1; }
   .mini { --cell: 18px; }
   .opponent .mini { --cell: 14px; }
 }
+
+/* ---------- Multiplayer (2–4) ---------- */
+.players { list-style: none; margin: 8px 0 0; padding: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.players .player { display: grid; justify-items: center; align-content: start; gap: 4px; font-weight: 600; text-align: center; font-size: 0.92rem; min-width: 0; }
+.players .player > span:not(.avatar) { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.players .player small { color: var(--ink-soft); font-weight: 450; font-size: 0.75rem; }
+.players .avatar { width: 56px; height: 56px; font-size: 1.5rem; }
+.players .player:nth-child(1) .avatar { background: var(--pink); }
+.players .player:nth-child(2) .avatar { background: var(--blue); }
+.players .player:nth-child(3) .avatar { background: var(--green); }
+.players .player:nth-child(4) .avatar { background: var(--purple); }
+.players .player.empty { color: var(--ink-soft); font-weight: 450; }
+.players .player.empty .avatar { background: var(--paper); color: var(--ink-soft); border-style: dashed; }
+
+.opponents { display: flex; gap: 8px; justify-content: center; }
+.opponents.as-boards .opp {
+  flex: 1;
+  max-width: 240px;
+  border: 2px dashed var(--ink-soft);
+  border-radius: var(--radius-s);
+  padding: 8px 10px 6px;
+  display: grid;
+  justify-items: center;
+  align-content: end;
+  gap: 4px;
+  min-width: 0;
+}
+.opponents.as-boards .mini { --cell: 11px; }
+.opponents .opp p { margin: 0; font-size: 0.85rem; color: var(--ink-soft); }
+.opponents .name { font-weight: 650; color: var(--ink); }
+.opponents .opp.done { border-style: solid; border-color: var(--ink); background: #fff8d6; }
+.opponents .gone { opacity: 0.45; }
+.opponents.as-bars { flex-direction: column; align-items: stretch; gap: 6px; }
+.opp-bar { width: 100%; display: grid; grid-template-columns: 5.5rem 1fr 4.8rem; align-items: center; gap: 8px; font-size: 0.9rem; }
+.opp-bar .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.opp-bar .status { text-align: right; font-weight: 600; color: var(--ink-soft); font-size: 0.85rem; }
+.opp-bar.done .status { color: var(--ink); }
+.track { height: 12px; border-radius: 99px; background: var(--paper); border: 2px solid var(--ink); overflow: hidden; }
+.fill { display: block; height: 100%; background: var(--green); transition: width 300ms ease-out; }
+.opp-bar.done .fill { background: var(--table); }
+
+.give-up { color: var(--ink-soft); }
+.note { margin: 0 auto; font-weight: 650; text-align: center; }
+
+.standings { width: 100%; border-collapse: collapse; font-size: 1rem; }
+.standings th, .standings td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--line); }
+.standings thead th { font-size: 0.78rem; color: var(--ink-soft); font-weight: 500; }
+.standings .place { font-weight: 700; color: var(--pink); width: 3rem; }
+.standings .pts { text-align: right; font-weight: 650; }
+.standings thead th:last-child { text-align: right; }
+.standings tr.mine { background: #fff6d1; }
+.sheet { max-height: 92dvh; overflow-y: auto; }
+.cards > .opponents { flex: 1; min-width: 0; }
+.track { display: block; width: 100%; min-width: 0; }
