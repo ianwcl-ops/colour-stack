@@ -1,6 +1,10 @@
-import { generatePuzzle } from './generate';
+import type { Board } from './board';
+import { generatePuzzle, solveForLevel } from './generate';
 
-self.onmessage = (ev: MessageEvent<{ id: number; seed: string; level: number }>) => {
-  const { id, seed, level } = ev.data;
-  self.postMessage({ id, puzzle: generatePuzzle(seed, level) });
+type Job = { id: number; kind: 'puzzle'; seed: string; level: number } | { id: number; kind: 'hint'; board: Board; level: number };
+
+self.onmessage = (ev: MessageEvent<Job>) => {
+  const job = ev.data;
+  if (job.kind === 'puzzle') self.postMessage({ id: job.id, result: generatePuzzle(job.seed, job.level) });
+  else self.postMessage({ id: job.id, result: solveForLevel(job.board, job.level).moves[0] ?? null });
 };

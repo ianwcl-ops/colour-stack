@@ -22,10 +22,11 @@ export class BoardView {
   constructor(
     board: Board,
     private onMove: (from: number, to: number) => void,
+    opts: { big?: boolean } = {},
   ) {
     this.board = board;
     this.rodsEl = h('div.shelves');
-    this.el = h('div.table', { style: `--cap:${board.capacity}` }, this.rodsEl);
+    this.el = h(`div.table${opts.big ? '.big' : ''}`, { style: `--cap:${board.capacity}` }, this.rodsEl);
     this.rodsEl.addEventListener('pointerdown', this.pointerDown);
     // Keyboard activation (Enter/Space) fires click with detail 0 and no pointer events.
     this.rodsEl.addEventListener('click', (ev) => {
@@ -62,10 +63,37 @@ export class BoardView {
   }
 
   update(board: Board, flight?: Flight): void {
+    this.clearHint();
     this.board = board;
     this.selected = null;
     this.render();
     if (flight) this.fly(flight);
+  }
+
+  /** Hint: pulse the rod to lift from, then the rod to drop on. */
+  highlight(from: number, to: number): void {
+    this.el.querySelectorAll('.hint-from, .hint-to').forEach((e) => e.classList.remove('hint-from', 'hint-to'));
+    const a = this.rodsEl.querySelector(`.rod[data-rod="${from}"]`);
+    const b = this.rodsEl.querySelector(`.rod[data-rod="${to}"]`);
+    a?.classList.add('hint-from');
+    b?.classList.add('hint-to');
+    a?.setAttribute('data-hint', 'Lift');
+    b?.setAttribute('data-hint', 'Drop');
+    this.hintTimer = setTimeout(() => this.clearHint(), 4000);
+  }
+
+  private hintTimer: ReturnType<typeof setTimeout> | undefined;
+  private clearHint(): void {
+    clearTimeout(this.hintTimer);
+    this.el.querySelectorAll('.hint-from, .hint-to').forEach((e) => {
+      e.classList.remove('hint-from', 'hint-to');
+      e.removeAttribute('data-hint');
+    });
+  }
+
+  /** Where a rod is on screen, for celebrations. */
+  rodRect(i: number): DOMRect | null {
+    return this.rodsEl.querySelector(`.rod[data-rod="${i}"]`)?.getBoundingClientRect() ?? null;
   }
 
   private rodAt(target: EventTarget | null): number | null {

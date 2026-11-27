@@ -1,5 +1,5 @@
 import { heuristic } from '../engine/solver';
-import type { MatchState, Player } from '../net/match';
+import { playerPuzzle, type MatchState, type Player } from '../net/match';
 import { h } from './dom';
 import { miniBoard } from './rings';
 
@@ -11,11 +11,7 @@ export const ordinal = (n: number): string => `${n}${['th', 'st', 'nd', 'rd'][n 
  */
 export class OpponentsPanel {
   readonly el = h('section.opponents', { 'aria-label': 'Other players' });
-  private startH = 1;
-
   constructor(private s: MatchState) {
-    const p = s.puzzle!;
-    this.startH = Math.max(1, heuristic(p.start.rods, p.start.capacity));
     window.addEventListener('resize', this.onResize);
     this.update(s);
   }
@@ -40,6 +36,7 @@ export class OpponentsPanel {
 
   private status(p: Player): string {
     if (!p.present) return 'left';
+    if (!p.connected && !p.result) return 'reconnecting…';
     if (p.result?.gaveUp) return 'gave up';
     if (p.result?.place) return ordinal(p.result.place);
     return `${p.moves} moves`;
@@ -48,24 +45,26 @@ export class OpponentsPanel {
   private progress(p: Player): number {
     if (p.result && !p.result.gaveUp) return 1;
     if (!p.rods.length) return 0;
-    const cap = this.s.puzzle!.start.capacity;
-    return Math.min(1, Math.max(0, 1 - heuristic(p.rods, cap) / this.startH));
+    const start = playerPuzzle(this.s, p).start;
+    const startH = Math.max(1, heuristic(start.rods, start.capacity));
+    return Math.min(1, Math.max(0, 1 - heuristic(p.rods, start.capacity) / startH));
   }
 
   private board(p: Player): HTMLElement {
-    const cap = this.s.puzzle!.start.capacity;
+    const cap = playerPuzzle(this.s, p).start.capacity;
     return h(
-      `article.opp${p.result ? '.done' : ''}${p.present ? '' : '.gone'}`,
+      `article.opp${p.result ? '.done' : ''}${p.present && (p.connected || p.result) ? '' : '.gone'}`,
       { 'data-player': p.name },
       miniBoard(p.rods, cap),
       h('p', {}, h('span.name', {}, p.name), ' ', h('strong.status', {}, this.status(p))),
+      p.handicap ? h('small.lmm-tag', {}, 'Little man mode') : null,
     );
   }
 
   private bar(p: Player): HTMLElement {
     const pct = Math.round(this.progress(p) * 100);
     return h(
-      `article.opp-bar${p.result ? '.done' : ''}${p.present ? '' : '.gone'}`,
+      `article.opp-bar${p.result ? '.done' : ''}${p.present && (p.connected || p.result) ? '' : '.gone'}`,
       { 'data-player': p.name },
       h('span.name', {}, p.name),
       h('span.track', { role: 'progressbar', 'aria-valuenow': pct, 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-label': `${p.name}'s progress` }, h('span.fill', { style: `width:${pct}%` })),

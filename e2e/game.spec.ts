@@ -171,9 +171,11 @@ test.describe('multiplayer races', () => {
     await expect(host.getByRole('dialog')).toContainText('You came 2nd');
     await expect(jake.getByRole('dialog')).toContainText('Race over');
     const rows = jake.locator('.standings tbody tr');
+    // Placing points plus +2 par bonus (both solved in exactly par moves).
     await expect(rows.nth(0)).toContainText('1stKeira');
-    await expect(rows.nth(0).locator('.pts')).toHaveText('3');
-    await expect(rows.nth(1).locator('.pts')).toHaveText('2');
+    await expect(rows.nth(0).locator('.pts')).toHaveText('5');
+    await expect(rows.nth(0).locator('.bonus')).toHaveText('incl. +2 par bonus');
+    await expect(rows.nth(1).locator('.pts')).toHaveText('4');
     await expect(rows.nth(2)).toContainText('gave up');
     await expect(rows.nth(2).locator('.pts')).toHaveText('0');
 
@@ -219,6 +221,120 @@ test.describe('multiplayer races', () => {
     await page.evaluate(() => localStorage.setItem('cs.name', JSON.stringify('Jo')));
     await page.goto('/#room=ABCDEFGHJK');
     await expect(page.getByRole('status')).toContainText('Connecting');
+  });
+});
+
+async function tap(page: Page, from: number, to: number) {
+  await page.click(`.rod[data-rod="${from}"]`);
+  await page.click(`.rod[data-rod="${to}"]`);
+}
+const firstMoves = (page: Page) => page.evaluate(() => (window as unknown as Sol).__cs.solution());
+
+async function twoPlayerRace(context: import('@playwright/test').BrowserContext) {
+  const { host, link } = await openRoom(context, 'Sam');
+  const guest = await joinRoom(context, link, 'Jo');
+  await expect(host.locator('.status.ready')).toContainText('2 players in');
+  await host.bringToFront();
+  await host.getByRole('button', { name: /Easy/ }).click();
+  await host.click('#start-race');
+  for (const p of [host, guest]) await expect(p.locator('.countdown')).toHaveCount(0, { timeout: 8000 });
+  return { host, guest, link };
+}
+
+test.describe('staying connected', () => {
+  test('a player who drops off (switching apps) keeps playing and catches up when back', async ({ context }) => {
+    const { host, guest } = await twoPlayerRace(context);
+    await guest.bringToFront();
+    const [m1, m2] = await firstMoves(guest);
+    await tap(guest, ...m1!);
+    await expect(host.locator('[data-player="Jo"] .status')).toHaveText('1 moves');
+
+    await guest.evaluate(() => (window as unknown as { __csNet: { drop(): void } }).__csNet.drop());
+    await expect(host.locator('[data-player="Jo"] .status')).toHaveText('reconnecting…');
+    await expect(guest.locator('.banner.soft')).toContainText('Reconnecting');
+    await tap(guest, ...m2!); // still playable while offline
+
+    await expect(host.locator('[data-player="Jo"] .status')).toHaveText('2 moves', { timeout: 10_000 });
+    await expect(guest.locator('.banner.soft')).toHaveCount(0);
+    await solveByTapping(guest);
+    await solveByTapping(host);
+    await expect(guest.getByRole('dialog')).toContainText('You win!');
+  });
+
+  test('closing and reopening the page mid-race restores the board, moves and seat', async ({ context }) => {
+    const { host, guest } = await twoPlayerRace(context);
+    await guest.bringToFront();
+    const moves = await firstMoves(guest);
+    await tap(guest, ...moves[0]!);
+    await tap(guest, ...moves[1]!);
+    const before = await guest.locator('.shelves').innerHTML();
+
+    await guest.reload();
+    await expect(guest.locator('.moves strong')).toHaveText('2', { timeout: 10_000 });
+    await expect(guest.locator('.countdown')).toHaveCount(0);
+    expect(await guest.locator('.shelves').innerHTML()).toBe(before);
+    await expect(host.locator('[data-player="Jo"] .status')).toHaveText('2 moves');
+
+    await solveByTapping(host);
+    await expect(guest.locator('[data-player="Sam"] .status')).toHaveText('1st');
+    await solveByTapping(guest);
+    await expect(guest.getByRole('dialog')).toContainText('You came 2nd');
+  });
+
+  test('the room creator reloading brings the room back and everyone rejoins', async ({ context }) => {
+    const { host, guest } = await twoPlayerRace(context);
+    await host.bringToFront();
+    const [hm] = await firstMoves(host);
+    await tap(host, ...hm!);
+    await guest.bringToFront();
+    const [gm] = await firstMoves(guest);
+    await tap(guest, ...gm!);
+
+    await host.reload();
+    await expect(host.locator('.moves strong')).toHaveText('1', { timeout: 10_000 });
+    await expect(host.locator('[data-player="Jo"] .status')).toHaveText('1 moves', { timeout: 15_000 });
+    await expect(guest.locator('.banner.soft')).toHaveCount(0, { timeout: 15_000 });
+
+    await solveByTapping(guest);
+    await solveByTapping(host);
+    await expect(host.getByRole('dialog')).toContainText('You came 2nd');
+    await expect(guest.getByRole('dialog')).toContainText('You win!');
+  });
+});
+
+test.describe('Little man mode', () => {
+  test('the creator switches it on for one player, who races one level easier with extra help', async ({ context }) => {
+    const { host, link } = await openRoom(context, 'Ian');
+    const jake = await joinRoom(context, link, 'Jake');
+    await expect(host.locator('.status.ready')).toContainText('2 players in');
+    await host.bringToFront();
+    await host.getByRole('button', { name: 'Little man mode for Jake' }).click();
+    await expect(host.getByRole('button', { name: 'Little man mode for Jake' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(jake.locator('.players .lmm-tag')).toHaveText('Little man mode');
+    await host.getByRole('button', { name: /Tricky/ }).click();
+    await expect(host.locator('.lobby')).toContainText('Little man mode players race Easy while everyone else races Tricky');
+
+    await host.click('#start-race');
+    for (const p of [host, jake]) await expect(p.locator('.countdown')).toHaveCount(0, { timeout: 8000 });
+    await expect(host.locator('.rod')).toHaveCount(7); // Tricky: 5 colours + 2 spare
+    await expect(jake.locator('.rod')).toHaveCount(6); // Easy: 4 colours + 2 spare
+    await expect(jake.locator('.heading small')).toContainText('Easy');
+    await expect(jake.locator('.lmm-badge')).toHaveText('Little man mode');
+    await expect(jake.locator('.table.big')).toHaveCount(1);
+    await expect(host.locator('.table.big')).toHaveCount(0);
+    await expect(host.getByRole('button', { name: 'Hint' })).toHaveCount(0);
+
+    await jake.bringToFront();
+    await jake.getByRole('button', { name: 'Hint' }).click();
+    await expect(jake.locator('.rod.hint-from')).toHaveCount(1, { timeout: 10_000 });
+    await expect(jake.locator('.rod.hint-to')).toHaveCount(1);
+
+    // Completing rods cheers him on.
+    await solveByTapping(jake);
+    await expect(jake.locator('.cheer').first()).toBeAttached();
+    await solveByTapping(host);
+    await expect(jake.getByRole('dialog')).toContainText('You win!');
+    await expect(host.locator('.standings')).toContainText('Little man mode');
   });
 });
 

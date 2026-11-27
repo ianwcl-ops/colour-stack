@@ -2,7 +2,7 @@ import '@fontsource-variable/fredoka';
 import './style.css';
 import { checkPasscode } from './access/passcode';
 import { newRoomCode, roomFromHash, roomLink } from './access/room';
-import { PASSCODE_HASH, transport } from './config';
+import { E2E, PASSCODE_HASH, transport } from './config';
 import { dailyPuzzleSpec } from './engine/daily';
 import type { Puzzle } from './engine/generate';
 import { getLevel, LEVELS } from './engine/levels';
@@ -15,13 +15,19 @@ import {
   HOST_ID,
   MAX_PLAYERS,
   me,
+  newPid,
+  playerPuzzle,
   reduce,
+  restoreHost,
+  SEAT_HOLD_MS,
   type MatchEvent,
   type MatchState,
   type Out,
+  type Player,
   type PuzzleData,
 } from './net/match';
-import type { GuestTransport, HostTransport, TransportError } from './net/transport';
+import { resilientGuest, type ResilientGuest } from './net/resilient';
+import type { HostTransport, TransportError } from './net/transport';
 import { store } from './storage';
 import { formatTime, h, mount, reducedMotion } from './ui/dom';
 import { OpponentsPanel, ordinal } from './ui/opponents';
@@ -323,24 +329,35 @@ function hostRace(): void {
 const listNames = (names: string[]): string =>
   names.length <= 1 ? (names[0] ?? '') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
 
-function startRace(role: 'host' | 'guest', code: string): void {
-  let state: MatchState = createMatch(role, store.name(), store.practiceLevel() > 1 ? store.practiceLevel() : 2);
+function startRace(role: 'host' | 'guest', code: string, restored?: MatchState): void {
+  const pid = role === 'guest' ? store.seat(code) || newPid() : HOST_ID;
+  if (role === 'guest') store.setSeat(code, pid);
+  let state: MatchState = restored
+    ? restoreHost(restored)
+    : createMatch(role, store.name(), store.practiceLevel() > 1 ? store.practiceLevel() : 2, pid);
   let session: GameSession | null = null;
   let panel: OpponentsPanel | null = null;
   let sheetEl: HTMLElement | null = null;
+  let banner: HTMLElement | null = null;
   let error: string | null = null;
   let left = false;
   let starting = false;
+  const expiry = new Map<string, ReturnType<typeof setTimeout>>();
   const link = roomLink(location.href, code);
+  // Keep the room in the address bar, so a reload brings the creator back to it.
+  history.replaceState(null, '', link);
 
-  const onError = (reason: TransportError): void => {
-    error =
-      reason === 'room-not-found'
-        ? 'This race has ended or hasn’t started yet. Ask for a fresh link.'
-        : reason === 'room-taken'
-          ? 'That room code is in use. Go back and start a new race.'
-          : 'Couldn’t connect. Check your internet connection and try again.';
-    paint(state, state);
+  const setBanner = (text: string | null): void => {
+    if (!text) {
+      banner?.remove();
+      banner = null;
+      return;
+    }
+    if (!banner) {
+      banner = h('div.banner.soft', { role: 'status' });
+      document.body.append(banner);
+    }
+    banner.textContent = text;
   };
 
   const hostConn: HostTransport | null =
@@ -348,33 +365,62 @@ function startRace(role: 'host' | 'guest', code: string): void {
       ? transport.host(code, {
           onJoin: (id) => dispatch({ kind: 'peer-joined', id }),
           onMessage: (id, msg) => dispatch({ kind: 'recv', from: id, msg: msg as never }),
-          onLeave: (id) => dispatch({ kind: 'peer-left', id }),
-          onError,
+          onLeave: (id) => dispatch({ kind: 'peer-dropped', id }),
+          onStatus: (online) => setBanner(online ? null : 'Reconnecting… everyone’s games carry on.'),
+          onError: (reason: TransportError) => {
+            error = reason === 'room-taken' ? 'Couldn’t reopen this room. Go back and start a new race.' : 'Couldn’t connect. Check your internet connection.';
+            paint(state, state);
+          },
         })
       : null;
-  const guestConn: GuestTransport | null =
+  const guestConn: ResilientGuest | null =
     role === 'guest'
-      ? transport.join(code, {
-          onOpen: () => dispatch({ kind: 'connected' }),
-          onMessage: (msg) => dispatch({ kind: 'recv', from: 'host', msg: msg as never }),
-          onClose: () => dispatch({ kind: 'disconnected' }),
-          onError,
-        })
+      ? resilientGuest(
+          transport,
+          code,
+          {
+            onOpen: () => dispatch({ kind: 'connected' }),
+            onMessage: (msg) => dispatch({ kind: 'recv', from: 'host', msg: msg as never }),
+            onDown: () => dispatch({ kind: 'disconnected' }),
+            onGiveUp: (never) => {
+              if (never) {
+                error = 'This race has ended or hasn’t started yet. Ask for a fresh link.';
+                paint(state, state);
+              } else dispatch({ kind: 'reconnect-failed' });
+            },
+          },
+          { holdMs: SEAT_HOLD_MS },
+        )
       : null;
+  if (E2E && guestConn) (window as unknown as { __csNet: unknown }).__csNet = { drop: () => guestConn.drop() };
 
-  const closeConn = (): void => {
+  // Phone back on screen: make sure the room creator is reachable again.
+  const onVisible = (): void => {
+    if (document.visibilityState === 'visible') hostConn?.refresh();
+  };
+  document.addEventListener('visibilitychange', onVisible);
+  // Closing the tab or the browser is not leaving: the seat (or room) is kept.
+  const onPageHide = (): void => {
     hostConn?.close();
     guestConn?.close();
   };
-  window.addEventListener('pagehide', closeConn);
+  window.addEventListener('pagehide', onPageHide);
+
   const leave = (): void => home();
 
   function send(outs: Out[]): void {
     for (const o of outs) {
       if (hostConn) {
-        if (o.to === 'all') hostConn.broadcast(o.msg, o.except);
-        else hostConn.send(o.to, o.msg);
-        if (o.close) hostConn.kick(o.to);
+        const links = Object.entries(state.links);
+        if (o.to === 'all') {
+          for (const [c, p] of links) if (p !== o.except) hostConn.send(c, o.msg);
+        } else {
+          const conns = links.filter(([, p]) => p === o.to).map(([c]) => c);
+          for (const c of conns.length ? conns : [o.to]) {
+            hostConn.send(c, o.msg);
+            if (o.close) hostConn.kick(c);
+          }
+        }
       } else guestConn?.send(o.msg);
     }
   }
@@ -385,6 +431,7 @@ function startRace(role: 'host' | 'guest', code: string): void {
     const r = reduce(state, e);
     state = r.state;
     send(r.outbox);
+    if (role === 'host' && state !== prev) store.saveHostRoom(code, state);
     paint(prev, state);
   }
 
@@ -392,8 +439,10 @@ function startRace(role: 'host' | 'guest', code: string): void {
     if (starting) return;
     starting = true;
     try {
-      const p = await makePuzzle(`${code}-${state.round + 1}-${Date.now()}`, state.level);
-      dispatch({ kind: 'start-round', puzzle: toData(p) });
+      const seed = `${code}-${state.round + 1}-${Date.now()}`;
+      const needEasy = state.level > 1 && state.players.some((p) => p.present && p.lmm);
+      const [main, easy] = await Promise.all([makePuzzle(seed, state.level), needEasy ? makePuzzle(`${seed}-lmm`, state.level - 1) : null]);
+      dispatch(easy ? { kind: 'start-round', puzzle: toData(main), easy: toData(easy) } : { kind: 'start-round', puzzle: toData(main) });
     } finally {
       starting = false;
     }
@@ -432,6 +481,29 @@ function startRace(role: 'host' | 'guest', code: string): void {
       ),
     );
 
+  const lmmSwitch = (p: Player): HTMLElement =>
+    h(
+      `button.lmm-toggle${p.lmm ? '.on' : ''}`,
+      { type: 'button', 'aria-pressed': p.lmm ? 'true' : 'false', 'aria-label': `Little man mode for ${p.name}`, onclick: () => dispatch({ kind: 'toggle-lmm', id: p.id }) },
+      h('span.knob', { 'aria-hidden': 'true' }),
+      'Little man mode',
+    );
+
+  /** One row per player: easier puzzle plus hint, big rings and cheers. */
+  const lmmPicker = (s: MatchState): HTMLElement =>
+    h(
+      'fieldset.lmm-pick',
+      {},
+      h('legend', {}, 'Little man mode'),
+      h('p.help', {}, 'One level easier, with a hint button, bigger rings and a cheer for every finished rod.'),
+      ...s.players.filter((p) => p.present).map((p) => h('div.lmm-row', {}, h('span', {}, p.name), lmmSwitch(p))),
+    );
+
+  const lmmNote = (s: MatchState): HTMLElement | null =>
+    s.players.some((p) => p.present && p.lmm)
+      ? h('p.help', {}, s.level > 1 ? `Little man mode players race ${getLevel(s.level - 1).name} while everyone else races ${getLevel(s.level).name}.` : 'On Warm-up everyone races the same puzzle.')
+      : null;
+
   function lobby(s: MatchState): HTMLElement {
     const present = s.players.filter((p) => p.present);
     const host = s.players.find((p) => p.id === HOST_ID);
@@ -439,12 +511,14 @@ function startRace(role: 'host' | 'guest', code: string): void {
       const p = present[i];
       if (!p) return h('li.player.empty', {}, h('span.avatar', {}, '?'), h('span', {}, 'Open spot'));
       return h(
-        `li.player${p.id === s.myId ? '.me' : ''}`,
+        `li.player${p.id === s.myId ? '.me' : ''}${p.connected ? '' : '.away'}`,
         {},
         h('span.avatar', {}, p.name.slice(0, 1).toUpperCase()),
         h('span', {}, p.id === s.myId ? `${p.name} (you)` : p.name),
         p.id === HOST_ID ? h('small', {}, 'Room creator') : null,
+        !p.connected ? h('small', {}, 'Reconnecting…') : null,
         p.points ? h('small', {}, `${p.points} pts`) : null,
+        p.lmm ? h('small.lmm-tag', {}, 'Little man mode') : null,
       );
     });
 
@@ -455,7 +529,7 @@ function startRace(role: 'host' | 'guest', code: string): void {
         present.length < 2
           ? h('p.status', { role: 'status' }, 'Waiting for players to open the link…')
           : h('p.status.ready', { role: 'status' }, `${present.length} players in. Start whenever you’re ready.`);
-    else if (!s.myId) status = h('p.status', { role: 'status' }, 'Connecting…');
+    else if (s.conn !== 'online') status = h('p.status', { role: 'status' }, s.conn === 'reconnecting' ? 'Reconnecting…' : 'Connecting…');
     else if (s.raceInProgress) status = h('p.status', { role: 'status' }, 'A race is on right now. You’ll join the next one.');
     else status = h('p.status.ready', { role: 'status' }, `You’re in. Waiting for ${host?.name ?? 'the room creator'} to start.`);
 
@@ -466,9 +540,17 @@ function startRace(role: 'host' | 'guest', code: string): void {
       h('ul.players', { 'aria-label': 'Players' }, ...slots),
       status,
       s.role === 'host' && present.length < MAX_PLAYERS && !error
-        ? h('div.invite', {}, h('p.help', {}, `Send this link to up to ${MAX_PLAYERS - present.length} more. It only works for this room.`), inviteButton(), h('code.link-text', {}, link))
+        ? h(
+            'div.invite',
+            {},
+            h('p.help', {}, `Send this link to up to ${MAX_PLAYERS - present.length} more. It only works for this room. It’s fine to switch apps to send it.`),
+            inviteButton(),
+            h('code.link-text', {}, link),
+          )
         : null,
       s.role === 'host' ? levelPicker(s, 'Level') : h('p.lede', {}, `Level ${s.level}: ${getLevel(s.level).name}`),
+      s.role === 'host' ? lmmPicker(s) : null,
+      lmmNote(s),
       s.role === 'host'
         ? h(
             'button.primary.big',
@@ -499,10 +581,42 @@ function startRace(role: 'host' | 'guest', code: string): void {
     setTimeout(tick, 800);
   }
 
+  /** Build the board for this round: with a countdown for a new round, or straight in when resuming. */
+  function buildSession(s: MatchState, withCountdown: boolean): void {
+    sheetEl?.remove();
+    sheetEl = null;
+    session?.destroy();
+    panel?.destroy();
+    const mine = me(s);
+    const puzzle = playerPuzzle(s, mine);
+    panel = new OpponentsPanel(s);
+    const others = s.players.filter((p) => p.inRound && p.id !== s.myId).map((p) => p.name);
+    session = new GameSession({
+      puzzle,
+      heading: others.length === 1 ? `Race vs ${others[0]}` : `${others.length + 1}-player race`,
+      sub: `${getLevel(puzzle.level).name}, round ${s.round}`,
+      allowReset: false,
+      side: panel.el,
+      onBack: leave,
+      onMove: (rods, moves) => dispatch({ kind: 'local-move', rods, moves }),
+      onSolved: (moves, ms) => dispatch({ kind: 'local-solved', moves, ms }),
+      onGiveUp: () => dispatch({ kind: 'give-up' }),
+      ...(withCountdown ? {} : { resume: { rods: mine.rods, moves: mine.moves } }),
+      littleMan: mine.lmm,
+    });
+    mount(app, session.el);
+    if (withCountdown)
+      countdown(() => {
+        dispatch({ kind: 'go' });
+        session?.start();
+      });
+    else session.start();
+  }
+
   /** Waiting line shown after you finish while others are still going. */
   function placedNote(s: MatchState): string {
     const mine = me(s).result;
-    const still = s.players.filter((p) => p.present && p.inRound && !p.result).map((p) => p.name);
+    const still = s.players.filter((p) => p.present && p.inRound && !p.result).map((p) => (p.connected ? p.name : `${p.name} (reconnecting)`));
     const head = mine?.gaveUp ? 'You gave up.' : mine?.place ? `You came ${ordinal(mine.place)}!` : 'Checking…';
     return still.length ? `${head} Waiting for ${listNames(still)} to finish.` : head;
   }
@@ -513,20 +627,22 @@ function startRace(role: 'host' | 'guest', code: string): void {
     const ranked = s.players
       .filter((p) => p.inRound)
       .sort((a, b) => (a.result?.place ?? 99) - (b.result?.place ?? 99) || (b.present ? 1 : 0) - (a.present ? 1 : 0));
-    const rows = ranked.map((p) =>
-      h(
+    const rows = ranked.map((p) => {
+      const r = p.result;
+      return h(
         `tr${p.id === s.myId ? '.mine' : ''}`,
         {},
-        h('td.place', {}, p.result?.place ? ordinal(p.result.place) : '–'),
-        h('th', { scope: 'row' }, p.name),
-        h('td', {}, p.result?.gaveUp ? 'gave up' : !p.present && !p.result ? 'left' : p.result ? `${p.result.moves} moves` : ''),
+        h('td.place', {}, r?.place ? ordinal(r.place) : '–'),
+        h('th', { scope: 'row' }, p.name, p.handicap ? h('small.lmm-tag', {}, 'Little man mode') : null),
+        h('td', {}, r?.gaveUp ? 'gave up' : !p.present && !r ? 'left' : r ? `${r.moves}` : ''),
+        h('td.round', {}, r && !r.gaveUp ? `+${r.earned}` : '0', r?.bonus ? h('small.bonus', {}, `incl. +${r.bonus} par bonus`) : null),
         h('td.pts', {}, `${p.points}`),
-      ),
-    );
+      );
+    });
     const table = h(
       'table.standings',
       {},
-      h('thead', {}, h('tr', {}, h('th', {}, ''), h('th', {}, 'Player'), h('th', {}, 'This round'), h('th', {}, 'Points'))),
+      h('thead', {}, h('tr', {}, h('th', {}, ''), h('th', {}, 'Player'), h('th', {}, 'Moves'), h('th', {}, 'Round'), h('th', {}, 'Total'))),
       h('tbody', {}, ...rows),
     );
 
@@ -548,16 +664,21 @@ function startRace(role: 'host' | 'guest', code: string): void {
     const title = mine.result?.place === 1 ? 'You win!' : mine.result?.place ? `You came ${ordinal(mine.result.place)}` : 'Race over';
     const extra =
       s.role === 'host'
-        ? levelPicker(s, 'Next level')
-        : h('p.help', {}, `Next level: ${s.level} ${getLevel(s.level).name}. The room creator can change it.`);
+        ? [
+            levelPicker(s, 'Next level'),
+            lmmPicker(s),
+            lmmNote(s),
+          ]
+        : [h('p.help', {}, `Next level: ${s.level} ${getLevel(s.level).name}. The room creator can change it.`)];
 
     const old = sheetEl;
     sheetEl = sheet(
       title,
       [
-        mine.result?.place && s.puzzle ? starRow(stars(mine.result.moves, s.puzzle.par)) : null,
+        mine.result?.place ? starRow(stars(mine.result.moves, playerPuzzle(s, mine).par)) : null,
         table,
-        extra,
+        h('p.help.points-rule', {}, 'Places score 3, 2, 1 and 0. Par bonus: +2 at or under par, +1 within 2 moves of it.'),
+        ...extra,
         readiness,
       ],
       [rematch, ...(s.role === 'host' && s.players.filter((p) => p.present).length < MAX_PLAYERS ? [inviteButton('Invite more players')] : []), h('button.ghost', { type: 'button', onclick: leave }, 'Leave')],
@@ -574,55 +695,69 @@ function startRace(role: 'host' | 'guest', code: string): void {
     session?.destroy();
     panel?.destroy();
     session = null;
+    setBanner(null);
     mount(app, h('main.screen.centre', {}, h('h2.title', {}, title), h('p.lede', {}, text), h('button.primary', { type: 'button', onclick: leave }, 'Home')));
+  }
+
+  /** Host: hold a dropped player's seat for a few minutes, then free it. */
+  function trackSeats(prev: MatchState, s: MatchState): void {
+    if (s.role !== 'host') return;
+    for (const p of s.players) {
+      if (p.id === HOST_ID) continue;
+      const was = prev.players.find((x) => x.id === p.id);
+      const dropped = p.present && !p.connected;
+      if (dropped && (!was || was.connected || prev === s) && !expiry.has(p.id)) {
+        expiry.set(p.id, setTimeout(() => {
+          expiry.delete(p.id);
+          dispatch({ kind: 'peer-expired', id: p.id });
+        }, SEAT_HOLD_MS));
+      }
+      if (!dropped && expiry.has(p.id)) {
+        clearTimeout(expiry.get(p.id));
+        expiry.delete(p.id);
+      }
+    }
   }
 
   function paint(prev: MatchState, s: MatchState): void {
     if (left) return;
+    trackSeats(prev, s);
     if (s.full) return message('This race is full', `A room holds up to ${MAX_PLAYERS} players. Ask the room creator to start a new race.`);
-    if (s.closed && !prev.closed) {
-      if (s.phase === 'lobby') return message('The room has closed', 'The room creator left. Ask them for a new link.');
-      const banner = h('div.banner', { role: 'alert' }, 'The room creator left.', h('button', { type: 'button', onclick: leave }, 'Home'));
-      document.body.querySelector('.banner')?.remove();
-      document.body.append(banner);
-      session?.lock();
+    if (s.closed) {
+      if (!prev.closed) {
+        guestConn?.close();
+        message('The room has closed', 'The room creator ended the race, or couldn’t be reached for a few minutes. Ask them for a new link.');
+      }
       return;
     }
+    if (role === 'guest') setBanner(s.conn === 'reconnecting' ? 'Reconnecting… keep playing, your moves will catch up.' : null);
 
     // New round: build a fresh board and count down together.
     if (s.phase === 'countdown' && (prev.phase !== 'countdown' || prev.round !== s.round)) {
-      sheetEl?.remove();
-      sheetEl = null;
-      session?.destroy();
-      panel?.destroy();
-      panel = new OpponentsPanel(s);
-      const others = s.players.filter((p) => p.inRound && p.id !== s.myId).map((p) => p.name);
-      session = new GameSession({
-        puzzle: s.puzzle!,
-        heading: others.length === 1 ? `Race vs ${others[0]}` : `${others.length + 1}-player race`,
-        sub: `${getLevel(s.level).name}, round ${s.round}`,
-        allowReset: false,
-        side: panel.el,
-        onBack: leave,
-        onMove: (rods, moves) => dispatch({ kind: 'local-move', rods, moves }),
-        onSolved: (moves, ms) => dispatch({ kind: 'local-solved', moves, ms }),
-        onGiveUp: () => dispatch({ kind: 'give-up' }),
-      });
-      mount(app, session.el);
-      countdown(() => {
-        dispatch({ kind: 'go' });
-        session?.start();
-      });
+      buildSession(s, true);
       return;
     }
 
     if (s.phase === 'lobby') {
-      session?.destroy();
-      panel?.destroy();
-      session = null;
-      panel = null;
+      if (prev.phase !== 'lobby' || !session) {
+        session?.destroy();
+        panel?.destroy();
+        sheetEl?.remove();
+        sheetEl = null;
+        session = null;
+        panel = null;
+      }
       mount(app, lobby(s));
       return;
+    }
+
+    // Back after reopening the page (or the creator restoring the room): rebuild without a countdown.
+    if (!session && me(s).inRound) {
+      buildSession(s, false);
+      if (s.phase === 'finished') {
+        (session as GameSession | null)?.lock();
+        results(s, true);
+      }
     }
 
     panel?.update(s);
@@ -632,10 +767,10 @@ function startRace(role: 'host' | 'guest', code: string): void {
       session.setNote(placedNote(s));
     }
 
-    if (s.phase === 'finished' && prev.phase !== 'finished') {
+    if (s.phase === 'finished' && prev.phase !== 'finished' && !sheetEl) {
       session?.lock();
       setTimeout(() => {
-        if (state.phase === 'finished' && state.round === s.round) results(state, true);
+        if (state.phase === 'finished' && state.round === s.round && !sheetEl) results(state, true);
       }, reducedMotion() ? 0 : 400);
     } else if (s.phase === 'finished' && sheetEl) {
       results(s, false);
@@ -648,14 +783,33 @@ function startRace(role: 'host' | 'guest', code: string): void {
     }
   }
 
-  show(lobby(state));
+  if (restored) {
+    paint(createMatch('host', ''), state);
+    trackSeats(state, state);
+  } else show(lobby(state));
+  if (role === 'host') store.saveHostRoom(code, state);
+
   cleanup = () => {
+    // Leaving through the app is a real goodbye.
+    if (!left) {
+      if (role === 'host') {
+        dispatch({ kind: 'close-room' });
+        store.forgetHostRoom(code);
+      } else dispatch({ kind: 'leave' });
+    }
     left = true;
-    window.removeEventListener('pagehide', closeConn);
-    closeConn();
+    expiry.forEach((t) => clearTimeout(t));
+    document.removeEventListener('visibilitychange', onVisible);
+    window.removeEventListener('pagehide', onPageHide);
+    // Let the goodbye message go out before closing.
+    setTimeout(() => {
+      hostConn?.close();
+      guestConn?.close();
+    }, 300);
     session?.destroy();
     panel?.destroy();
     sheetEl?.remove();
+    setBanner(null);
     document.querySelector('.banner')?.remove();
   };
 }
@@ -665,13 +819,21 @@ function startRace(role: 'host' | 'guest', code: string): void {
 function route(): void {
   const room = roomFromHash(location.hash);
   gate(() => {
-    if (room) withName(() => startRace('guest', room));
-    else home();
+    if (!room) return home();
+    // The room creator's phone reloaded: bring the room back rather than joining it as a guest.
+    const saved = store.hostRoom(room) as MatchState | null;
+    if (saved) startRace('host', room, saved);
+    else withName(() => startRace('guest', room));
   });
 }
 
 route();
 // Pasting a race link into a tab that already has the game open only changes the #hash.
+let currentRoom = roomFromHash(location.hash);
 window.addEventListener('hashchange', () => {
-  if (roomFromHash(location.hash)) route();
+  const room = roomFromHash(location.hash);
+  if (room && room !== currentRoom) {
+    currentRoom = room;
+    route();
+  }
 });

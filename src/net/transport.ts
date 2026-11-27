@@ -4,15 +4,18 @@ export type TransportError = 'room-not-found' | 'room-taken' | 'network';
 
 /** The room creator's side: one connection per guest. */
 export interface HostTransport {
-  send(to: string, msg: Msg): void;
-  broadcast(msg: Msg, except?: string): void;
-  kick(id: string): void;
+  send(conn: string, msg: Msg): void;
+  broadcast(msg: Msg): void;
+  kick(conn: string): void;
+  /** After the phone wakes up: re-register with the matchmaking server if needed. */
+  refresh(): void;
   close(): void;
 }
 export interface HostHandlers {
-  onJoin(id: string): void;
-  onMessage(id: string, msg: unknown): void;
-  onLeave(id: string): void;
+  onJoin(conn: string): void;
+  onMessage(conn: string, msg: unknown): void;
+  onLeave(conn: string): void;
+  onStatus(online: boolean): void;
   onError(reason: TransportError): void;
 }
 
@@ -41,40 +44,67 @@ const PEER_PREFIX = 'colourstack-';
  */
 export const peerTransport: TransportFactory = {
   host(code, h) {
-    let peer: import('peerjs').Peer | null = null;
-    const conns = new Map<string, import('peerjs').DataConnection>();
+    type Peer = import('peerjs').Peer;
+    type Conn = import('peerjs').DataConnection;
+    let peer: Peer | null = null;
+    const conns = new Map<string, Conn>();
     let closed = false;
-    void import('peerjs').then(({ Peer }) => {
+    let attempts = 0;
+
+    const start = async (): Promise<void> => {
       if (closed) return;
-      peer = new Peer(PEER_PREFIX + code);
-      peer.on('connection', (c) => {
+      const { Peer } = await import('peerjs');
+      peer?.destroy();
+      const p = new Peer(PEER_PREFIX + code);
+      peer = p;
+      p.on('open', () => {
+        attempts = 0;
+        h.onStatus(true);
+      });
+      p.on('connection', (c) => {
         const id = c.connectionId;
         c.on('open', () => {
           conns.set(id, c);
           h.onJoin(id);
         });
         c.on('data', (d) => h.onMessage(id, d));
-        c.on('close', () => {
+        const gone = () => {
           if (conns.delete(id)) h.onLeave(id);
-        });
-        c.on('error', () => {
-          if (conns.delete(id)) h.onLeave(id);
-        });
+        };
+        c.on('close', gone);
+        c.on('error', gone);
       });
-      peer.on('error', (err) => h.onError(err.type === 'unavailable-id' ? 'room-taken' : 'network'));
-      peer.on('disconnected', () => peer?.reconnect());
-    });
-    const sendTo = (c: import('peerjs').DataConnection | undefined, m: Msg) => {
+      p.on('disconnected', () => {
+        h.onStatus(false);
+        if (!closed && !p.destroyed) p.reconnect();
+      });
+      p.on('error', (err) => {
+        if (closed) return;
+        // After a reload the server may still hold our room id for a little while: keep trying.
+        if (err.type === 'unavailable-id' && attempts > 30) return h.onError('room-taken');
+        if (['unavailable-id', 'network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type)) {
+          h.onStatus(false);
+          attempts++;
+          setTimeout(() => void start(), Math.min(2000 * attempts, 5000));
+        }
+      });
+    };
+    void start();
+
+    const sendTo = (c: Conn | undefined, m: Msg) => {
       if (c?.open) void c.send(m);
     };
     return {
-      send: (to, m) => sendTo(conns.get(to), m),
-      broadcast: (m, except) => conns.forEach((c, id) => id !== except && sendTo(c, m)),
-      kick: (id) => {
-        const c = conns.get(id);
-        conns.delete(id);
-        // Give the "room full" message a moment to arrive before closing.
+      send: (conn, m) => sendTo(conns.get(conn), m),
+      broadcast: (m) => conns.forEach((c) => sendTo(c, m)),
+      kick: (conn) => {
+        const c = conns.get(conn);
+        conns.delete(conn);
         setTimeout(() => c?.close(), 300);
+      },
+      refresh: () => {
+        if (!peer || peer.destroyed) void start();
+        else if (peer.disconnected) peer.reconnect();
       },
       close: () => {
         closed = true;
@@ -95,8 +125,10 @@ export const peerTransport: TransportFactory = {
         conn.on('open', h.onOpen);
         conn.on('data', h.onMessage);
         conn.on('close', h.onClose);
+        conn.on('error', h.onClose);
       });
       peer.on('error', (err) => h.onError(err.type === 'peer-unavailable' ? 'room-not-found' : 'network'));
+      peer.on('disconnected', () => h.onClose());
     });
     return {
       send: (m) => {
@@ -126,15 +158,22 @@ export const localTransport: TransportFactory = {
         if (guests.delete(d.from)) h.onLeave(d.from);
       } else if (d.kind === 'msg' && guests.has(d.from)) h.onMessage(d.from, d.msg);
     };
-    const post = (to: string, msg: Msg) => bc.postMessage({ from: 'host', to, kind: 'msg', msg });
+    setTimeout(() => h.onStatus(true), 0);
+    let closed = false;
+    const post = (to: string, msg: Msg) => {
+      if (!closed) bc.postMessage({ from: 'host', to, kind: 'msg', msg });
+    };
     return {
       send: post,
-      broadcast: (msg, except) => guests.forEach((g) => g !== except && post(g, msg)),
+      broadcast: (msg) => guests.forEach((g) => post(g, msg)),
       kick: (id) => {
         guests.delete(id);
-        setTimeout(() => bc.postMessage({ from: 'host', to: id, kind: 'bye' }), 100);
+        setTimeout(() => !closed && bc.postMessage({ from: 'host', to: id, kind: 'bye' }), 100);
       },
+      refresh: () => {},
       close: () => {
+        if (closed) return;
+        closed = true;
         guests.forEach((g) => bc.postMessage({ from: 'host', to: g, kind: 'bye' }));
         bc.close();
       },
@@ -154,10 +193,15 @@ export const localTransport: TransportFactory = {
       } else if (d.kind === 'bye') h.onClose();
       else if (d.kind === 'msg') h.onMessage(d.msg);
     };
+    let closed = false;
     bc.postMessage({ from: me, to: 'host', kind: 'join' });
     return {
-      send: (msg) => bc.postMessage({ from: me, to: 'host', kind: 'msg', msg }),
+      send: (msg) => {
+        if (!closed) bc.postMessage({ from: me, to: 'host', kind: 'msg', msg });
+      },
       close: () => {
+        if (closed) return;
+        closed = true;
         bc.postMessage({ from: me, to: 'host', kind: 'bye' });
         bc.close();
       },

@@ -1,10 +1,11 @@
-import { applyMove, isSolved, type Board, type Rods } from '../engine/board';
+import { applyMove, isRodComplete, isSolved, type Board, type Rods } from '../engine/board';
+import { hintMove } from '../engine/make-puzzle';
 import { solveForLevel } from '../engine/generate';
 import { stars, twoStarAllowance } from '../engine/score';
 import type { PuzzleData } from '../net/match';
 import { E2E } from '../config';
 import { BoardView } from './board-view';
-import { h } from './dom';
+import { h, reducedMotion } from './dom';
 
 export interface SessionOptions {
   puzzle: PuzzleData;
@@ -18,7 +19,14 @@ export interface SessionOptions {
   side?: HTMLElement;
   /** Races only: lets a stuck player stop (no points). */
   onGiveUp?: () => void;
+  /** Pick up where you left off (after reconnecting or reopening the page). */
+  resume?: { rods: Rods; moves: number };
+  /** Little man mode: hint button, bigger rings and a cheer for every finished rod. */
+  littleMan?: boolean;
 }
+
+const CHEERS = ['Great job!', 'Brilliant!', 'You did it!', 'Super sorting!', 'Awesome!', 'Fantastic!'];
+const CONFETTI = ['--pink', '--yellow', '--green', '--blue', '--purple', '--orange', '--teal'];
 
 /** One puzzle being played: header, target card, rods and move counter. */
 export class GameSession {
@@ -34,8 +42,10 @@ export class GameSession {
   private note = h('p.hint', {}, 'Tap a rod to lift its top ring, then tap where it goes.');
 
   constructor(private o: SessionOptions) {
-    this.board = o.puzzle.start;
-    this.view = new BoardView(this.board, (f, t) => this.move(f, t));
+    this.board = o.resume?.rods.length ? { rods: o.resume.rods, capacity: o.puzzle.start.capacity } : o.puzzle.start;
+    this.moves = o.resume?.moves ?? 0;
+    this.movesEl.textContent = String(this.moves);
+    this.view = new BoardView(this.board, (f, t) => this.move(f, t), { big: !!o.littleMan });
     this.view.setLocked(true);
 
     const p = o.puzzle;
@@ -56,18 +66,64 @@ export class GameSession {
           this.starsEl,
         ),
       ),
+      o.littleMan ? h('p.lmm-badge', {}, 'Little man mode') : null,
       o.side ? h('section.cards', {}, o.side) : h('p.goal', {}, 'Sort the rings so every rod holds just one colour.'),
       this.view.el,
       (this.footer = h(
         'footer.actions',
         {},
         o.allowReset ? h('button.ghost', { type: 'button', onclick: () => this.reset() }, 'Start over') : null,
+        o.littleMan ? this.hintButton() : null,
         o.onGiveUp ? this.giveUpButton(o.onGiveUp) : null,
-        this.note,
+        o.littleMan ? null : this.note,
       )),
     );
     this.paintStars();
     if (E2E) (window as unknown as { __cs: unknown }).__cs = { solution: () => solveForLevel(this.board, p.level).moves };
+  }
+
+  private hintButton(): HTMLElement {
+    const b = h<'button'>('button.hint-btn', {
+      type: 'button',
+      onclick: async () => {
+        if (this.finished || b.disabled) return;
+        b.disabled = true;
+        b.textContent = 'Thinking…';
+        const at = this.moves;
+        const move = await hintMove(this.board, this.o.puzzle.level);
+        b.disabled = false;
+        b.textContent = 'Hint';
+        if (move && at === this.moves && !this.finished) this.view.highlight(move[0], move[1]);
+      },
+    }, 'Hint');
+    return b;
+  }
+
+  /** A cheer and a burst of confetti over a rod that's just been finished. */
+  private celebrate(rod: number): void {
+    const rect = this.view.rodRect(rod);
+    if (!rect) return;
+    const cheer = h('div.cheer', { role: 'status' }, CHEERS[Math.floor(Math.random() * CHEERS.length)]!);
+    cheer.style.left = `${Math.min(Math.max(rect.left + rect.width / 2, 80), window.innerWidth - 80)}px`;
+    cheer.style.top = `${rect.top - 10}px`;
+    document.body.append(cheer);
+    setTimeout(() => cheer.remove(), 1400);
+    if (reducedMotion()) return;
+    for (let i = 0; i < 22; i++) {
+      const bit = h('span.confetti', { style: `background: var(${CONFETTI[i % CONFETTI.length]})` });
+      bit.style.left = `${rect.left + rect.width / 2}px`;
+      bit.style.top = `${rect.top + 10}px`;
+      document.body.append(bit);
+      const angle = Math.random() * Math.PI - Math.PI;
+      const dist = 60 + Math.random() * 90;
+      bit.animate(
+        [
+          { transform: 'translate(0,0) rotate(0)', opacity: 1 },
+          { transform: `translate(${Math.cos(angle) * dist}px, ${Math.sin(angle) * dist + 80}px) rotate(${Math.random() * 540}deg)`, opacity: 0 },
+        ],
+        { duration: 900 + Math.random() * 400, easing: 'cubic-bezier(.2,.7,.4,1)' },
+      ).onfinish = () => bit.remove();
+    }
   }
 
   /** Two taps, so a stray tap can't end someone's race. */
@@ -117,12 +173,14 @@ export class GameSession {
 
   private move(from: number, to: number): void {
     if (this.finished) return;
+    const wasDone = isRodComplete(this.board.rods[to]!, this.board.capacity);
     this.board = applyMove(this.board, from, to);
     this.moves++;
     this.movesEl.textContent = String(this.moves);
     this.view.update(this.board, this.view.takeFlight());
     this.paintStars();
     this.o.onMove?.(this.board.rods, this.moves);
+    if (this.o.littleMan && !wasDone && isRodComplete(this.board.rods[to]!, this.board.capacity)) this.celebrate(to);
     if (isSolved(this.board)) {
       this.finished = true;
       this.view.setLocked(true);
